@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gguf binary
+
+vendor/*.min.js linguist-vendored
+js/world-geo.js linguist-generated
+js/builtin-stations.js linguist-generated

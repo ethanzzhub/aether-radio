@@ -135,7 +135,19 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.classList.remove('is-visible'), 3200);
   }
+  // 目录里缺坐标的电台用空串表示，直接 Number('') 会变成 0 并被当成合法坐标，
+  // 结果所有无坐标电台都堆到几内亚湾 (0,0) 上。这里统一转成 NaN。
+  function coord(v, limit) {
+    if (v === null || v === undefined || v === '') return NaN;
+    const n = Number(v);
+    if (!Number.isFinite(n) || Math.abs(n) > limit) return NaN;
+    return n;
+  }
   function normalize(s) {
+    const lat = coord(s.geo_lat, 90);
+    const lng = coord(s.geo_long, 180);
+    // (0,0) 是目录里「坐标未知」的另一种写法，真实电台不会刚好落在这一点
+    const hasGeo = Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
     return {
       id: s.stationuuid,
       name: String(s.name || '未命名电台').trim(),
@@ -150,8 +162,9 @@
       clicks: Number(s.clickcount) || 0,
       codec: s.codec || '',
       bitrate: Number(s.bitrate) || 0,
-      lat: Number(s.geo_lat),
-      lng: Number(s.geo_long),
+      lat: hasGeo ? lat : NaN,
+      lng: hasGeo ? lng : NaN,
+      hasGeo,
       homepage: s.homepage || ''
     };
   }
@@ -504,6 +517,8 @@
     document.querySelectorAll('#mapModeSwitch button').forEach((b) =>
       b.classList.toggle('is-active', b.dataset.mode === mode));
     if (mode === '2d') {
+      // 手动切到 2D 时地球可能从未降级过，这里按需初始化
+      if (!flatMap) initFlatMap();
       if (globeReady && globe) {
         globe.renderer().domElement.style.display = 'none';
         if (globe.controls()) globe.controls().autoRotate = false;
@@ -758,7 +773,7 @@
     const meta = [
       ['语言', s.lang || '—'],
       ['音质', s.bitrate ? s.bitrate + ' kbps · ' + (s.codec || '—') : (s.codec || '—')],
-      ['坐标', Number.isFinite(s.lat) ? s.lat.toFixed(2) + '°, ' + s.lng.toFixed(2) + '°' : '—'],
+      ['坐标', Number.isFinite(s.lat) ? s.lat.toFixed(2) + '°, ' + s.lng.toFixed(2) + '°' : '目录未提供 · 仅列表可见'],
       ['热度', s.votes.toLocaleString() + ' 票']
     ];
     $('detailMeta').innerHTML = meta.map((row) => '<div><dt>' + esc(row[0]) + '</dt><dd>' + esc(row[1]) + '</dd></div>').join('');

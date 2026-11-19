@@ -50,23 +50,43 @@
       draw();
     }
 
+    // 跨 ±180 经线的环（南极洲、欧亚大陆东端、斐济等）如果在一条路径里画完，
+    // canvas 会把 +180 和 -180 直接连起来，于是在地图上拉出一条横贯全图的色带。
+    // 这里在经度跳变处把环断开成多段，各自独立填充。
+    function splitAtSeam(ring) {
+      const out = [];
+      let cur = [];
+      for (let i = 0; i < ring.length; i++) {
+        const p = ring[i];
+        if (cur.length && Math.abs(p[0] - cur[cur.length - 1][0]) > 180) {
+          if (cur.length >= 3) out.push(cur);
+          cur = [];
+        }
+        cur.push(p);
+      }
+      if (cur.length >= 3) out.push(cur);
+      return out;
+    }
+
     function drawLand() {
       const land = window.WORLD_LAND || [];
-      ctx.fillStyle = 'rgba(212, 206, 192, 0.92)';
-      ctx.strokeStyle = 'rgba(146, 152, 142, 0.6)';
+      ctx.fillStyle = 'rgba(201, 192, 172, 0.96)';
+      ctx.strokeStyle = 'rgba(128, 135, 124, 0.75)';
       ctx.lineWidth = 0.6;
       for (const poly of land) {
         for (const ring of poly) {
           if (ring.length < 3) continue;
-          ctx.beginPath();
-          for (let i = 0; i < ring.length; i++) {
-            const p = project(ring[i][0], ring[i][1]);
-            if (i === 0) ctx.moveTo(p.x, p.y);
-            else ctx.lineTo(p.x, p.y);
+          for (const seg of splitAtSeam(ring)) {
+            ctx.beginPath();
+            for (let i = 0; i < seg.length; i++) {
+              const p = project(seg[i][0], seg[i][1]);
+              if (i === 0) ctx.moveTo(p.x, p.y);
+              else ctx.lineTo(p.x, p.y);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
           }
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
         }
       }
     }

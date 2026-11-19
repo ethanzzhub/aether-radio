@@ -194,6 +194,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .suggest-item:last-child { border-bottom: 0; }
 .suggest-item:hover, .suggest-item.is-cursor { background: var(--surface-2); }
 .suggest-item img { width: 26px; height: 26px; object-fit: cover; background: var(--surface-3); flex: none; }
+.suggest-item .logo-box { width: 26px; height: 26px; flex: none; }
 .suggest-item .s-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .suggest-item .s-country { font-family: var(--font-mono); font-size: 10px; color: var(--dim); }
 
@@ -299,7 +300,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
     radial-gradient(circle at 78% 18%, oklch(93% 0.040 72 / .6), transparent 42%);
 }
 #globeContainer { position: absolute; inset: 0; }
-#globeContainer canvas { display: block; }
+/* 浅色背景下轻微提亮地球，避免整体过暗 */
+#globeContainer canvas { display: block; filter: brightness(1.1) saturate(0.92); }
 .globe-vignette {
   position: absolute; inset: 0; pointer-events: none;
   box-shadow: inset 0 0 110px 20px var(--paper);
@@ -377,6 +379,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   transform: translateY(-6px);
 }
 .globe-tip img { width: 28px; height: 28px; object-fit: cover; background: var(--surface-3); }
+.globe-tip .logo-box { width: 28px; height: 28px; flex: none; }
 .globe-tip b { display: block; font-size: 12px; font-weight: 600; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .globe-tip small { display: block; margin-top: 2px; font-size: 10px; color: var(--accent); }
 
@@ -414,10 +417,10 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   letter-spacing: -.01em;
 }
 .spotlight-empty p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.85; }
-.spotlight-stats { display: flex; gap: 34px; margin-top: 38px; padding-top: 22px; border-top: 1px solid var(--line-soft); }
-.spotlight-stats div { display: flex; flex-direction: column; gap: 4px; }
-.spotlight-stats strong { font-family: var(--font-display); font-size: 27px; font-weight: 500; color: var(--accent); }
-.spotlight-stats span { font-size: 10px; letter-spacing: .14em; color: var(--dim); }
+.spotlight-stats { display: flex; flex-wrap: wrap; gap: 14px 22px; margin-top: 34px; padding-top: 20px; border-top: 1px solid var(--line-soft); }
+.spotlight-stats div { display: flex; flex-direction: column; gap: 3px; min-width: 62px; }
+.spotlight-stats strong { font-family: var(--font-display); font-size: 23px; font-weight: 500; color: var(--accent); line-height: 1.1; }
+.spotlight-stats span { font-size: 9px; letter-spacing: .12em; color: var(--dim); }
 
 .detail-topline { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
 .live-tag { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em; color: var(--signal); }
@@ -505,6 +508,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   background: var(--surface);
   transition: background .22s;
   overflow: hidden;
+  /* 大列表性能：视口外的卡片跳过渲染 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
 }
 .station-card::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0;

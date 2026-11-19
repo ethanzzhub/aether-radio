@@ -27,7 +27,11 @@
   };
 
   const state = {
-    stations: [],
+    stations: [],          // 全量已载入电台（列表用，含无坐标）
+    geoStations: [],       // 其中有坐标的子集（地球用）
+    stationIndex: new Set(),
+    geoIndex: new Set(),
+    catalogTotal: 0,       // 目录总量，来自 /json/stats
     view: 'globe',
     query: '',
     genre: '',
@@ -42,11 +46,11 @@
     favorites: new Set(readJSON('aether:favorites', [])),
     volume: Number(readJSON('aether:volume', 0.8)),
     dataSource: 'api',
-    initialLimit: 600,     // 首屏加载量（目录总量 4 万+）
-    pageSize: 400,         // 每次「加载更多」从目录追加的数量
+    initialLimit: 1000,    // 首屏加载量（目录总量 5 万+）
+    pageSize: 1000,        // 每次「加载更多」从目录追加的数量
     codecSupport: {},
     mapMode: 'auto',       // auto | 3d | 2d
-    nextOffset: 600,
+    nextOffset: 1000,
     searchOffset: 0,
     hasMore: true,
     searchHasMore: true,
@@ -60,6 +64,7 @@
   let searchTimer = null;
   let toastTimer = null;
   let searchGeneration = 0;
+  let autoLoadAt = 0;
 
   const $ = (id) => document.getElementById(id);
   const audio = $('audio');
@@ -200,7 +205,7 @@
         clearTimeout(timer);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
-        if (!Array.isArray(data)) throw new Error('响应格式异常');
+        if (data === null || typeof data !== 'object') throw new Error('响应格式异常');
         return data;
       } catch (err) {
         clearTimeout(timer);
@@ -212,20 +217,52 @@
 
   let lastLoadBlocked = false;
 
+  // 把一批电台同时并入「全量池」与「地球池」，按 id 去重
+  function ingest(list, reset) {
+    if (reset) {
+      state.stations = [];
+      state.geoStations = [];
+      state.stationIndex = new Set();
+      state.geoIndex = new Set();
+    }
+    for (const s of list) {
+      if (!s || !s.id) continue;
+      if (!state.stationIndex.has(s.id)) {
+        state.stationIndex.add(s.id);
+        state.stations.push(s);
+      }
+      if (Number.isFinite(s.lat) && Number.isFinite(s.lng) && !state.geoIndex.has(s.id)) {
+        state.geoIndex.add(s.id);
+        state.geoStations.push(s);
+      }
+    }
+  }
+
+  // 目录总量（用于状态栏展示「/ 目录 52,981」）
+  async function loadCatalogTotal() {
+    try {
+      const stats = await apiGet('/json/stats', {}, 8000);
+      if (stats && Number(stats.stations) > 0) {
+        state.catalogTotal = Number(stats.stations);
+        updateResultMeta();
+      }
+    } catch (_) { /* 统计接口失败不影响主流程 */ }
+  }
+
   async function loadStations() {
     const started = performance.now();
     try {
+      // 主请求不带坐标限制：列表需要全部电台
       const raw = await apiGet('/json/stations/search', {
         hidebroken: 'true',
-        has_geo_info: 'true',
         order: 'votes',
         reverse: 'true',
         limit: String(state.initialLimit)
-      }, 15000);
+      }, 20000);
       if (!raw.length) throw new Error('空结果');
-      state.stations = raw.map(normalize).filter(usable);
+      ingest(raw.map(normalize).filter(usable), true);
       state.dataSource = 'api';
-      state.nextOffset = state.initialLimit;
+      state.nextOffset = raw.length;
       state.hasMore = true;
       lastLoadBlocked = false;
     } catch (err) {
@@ -234,14 +271,15 @@
       lastLoadBlocked = elapsed < 500;
       const builtin = (window.BUILTIN_STATIONS || []).map(normalize).filter(usable);
       const fallback = (window.FALLBACK_STATIONS || []).map(normalize).filter(usable);
-      state.stations = builtin.length ? builtin : fallback;
+      ingest(builtin.length ? builtin : fallback, true);
       state.dataSource = builtin.length ? 'builtin' : 'fallback';
       state.hasMore = false;
     }
     if (!state.stations.length) {
-      state.stations = (window.BUILTIN_STATIONS || window.FALLBACK_STATIONS || []).map(normalize);
+      ingest((window.BUILTIN_STATIONS || window.FALLBACK_STATIONS || []).map(normalize), true);
     }
     state.stations.sort((a, b) => b.votes - a.votes);
+    state.geoStations.sort((a, b) => b.votes - a.votes);
     buildGenreChips();
     buildCountryOptions();
     updateStats();
@@ -252,7 +290,76 @@
       toast(lastLoadBlocked
         ? '所在环境限制了外部数据请求，已启用内置 ' + state.stations.length + ' 座电台'
         : '暂时连不上电台目录，已启用内置 ' + state.stations.length + ' 座电台', true);
+      return;
     }
+    // 后台补充有地理坐标的电台，让地球更完整（不阻塞、不重排列表）
+    loadGeoPool();
+    loadCatalogTotal();
+  }
+
+  // 筛选/搜索时向目录补全结果，避免只筛本地已载入的池
+  async function supplementFilter() {
+    if (state.dataSource !== 'api') return;
+    const base = { hidebroken: 'true', order: 'votes', reverse: 'true', limit: '400' };
+    const cc = state.country ? { countrycode: state.country.toUpperCase() } : {};
+    const reqs = [];
+    if (state.query) {
+      // 名称匹配 + 标签匹配（用户常搜流派词，如 jazz、reggae）
+      reqs.push(Object.assign({}, base, cc, { name: state.query },
+        state.genre ? { tag: state.genre } : {}));
+      if (!state.genre) reqs.push(Object.assign({}, base, cc, { tag: state.query }));
+    } else if (state.country || state.genre) {
+      reqs.push(Object.assign({}, base, cc, state.genre ? { tag: state.genre } : {}));
+    }
+    if (!reqs.length) return;
+    const results = await Promise.allSettled(reqs.map((p) => apiGet('/json/stations/search', p, 15000)));
+    const merged = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled' && Array.isArray(r.value)) merged.push.apply(merged, r.value);
+    }
+    if (!merged.length) return;
+    const before = state.stations.length;
+    ingest(merged.map(normalize).filter(usable), false);
+    if (state.stations.length === before) return;
+    buildGenreChips();
+    buildCountryOptions();
+    updateStats();
+    updateGlobeData();
+    renderList();
+    updateResultMeta();
+  }
+
+  // 专门为地球补充有坐标的电台；结果同时进列表池
+  async function loadGeoPool() {
+    try {
+      const raw = await apiGet('/json/stations/search', {
+        hidebroken: 'true',
+        has_geo_info: 'true',
+        order: 'votes',
+        reverse: 'true',
+        limit: '3000'
+      }, 25000);
+      if (!Array.isArray(raw) || !raw.length) return;
+      const valid = raw.map(normalize).filter(usable);
+      let added = 0;
+      for (const s of valid) {
+        if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) continue;
+        if (!state.geoIndex.has(s.id)) {
+          state.geoIndex.add(s.id);
+          state.geoStations.push(s);
+          added += 1;
+        }
+        if (!state.stationIndex.has(s.id)) {
+          state.stationIndex.add(s.id);
+          state.stations.push(s);
+        }
+      }
+      if (!added) return;
+      state.geoStations.sort((a, b) => b.votes - a.votes);
+      updateStats();
+      updateGlobeData();
+      updateResultMeta();
+    } catch (_) { /* 地球池补充失败不影响主流程 */ }
   }
 
   async function retryConnection() {
@@ -277,15 +384,15 @@
         limit: String(state.pageSize),
         offset: String(state.query ? state.searchOffset : state.nextOffset)
       };
-      // 搜索态下按关键词翻页，否则按热门电台翻页
+      // 搜索态下按关键词翻页，否则按热门电台翻页（不做坐标限制，列表要全量）
       if (state.query) params.name = state.query;
-      else params.has_geo_info = 'true';
-      const raw = await apiGet('/json/stations/search', params, 15000);
-      const known = new Set(state.stations.map((s) => s.id));
-      const fresh = raw.map(normalize).filter(usable).filter((s) => !known.has(s.id));
-      if (fresh.length) {
-        state.stations = state.stations.concat(fresh);
+      const raw = await apiGet('/json/stations/search', params, 20000);
+      const before = state.stations.length;
+      ingest(raw.map(normalize).filter(usable), false);
+      const fresh = state.stations.length - before;
+      if (fresh) {
         state.stations.sort((a, b) => b.votes - a.votes);
+        state.geoStations.sort((a, b) => b.votes - a.votes);
         buildGenreChips();
         buildCountryOptions();
         updateStats();
@@ -300,7 +407,7 @@
         state.hasMore = raw.length >= state.pageSize;
       }
       updateResultMeta();
-      toast(fresh.length ? '已追加 ' + fresh.length + ' 座电台' : '没有更多新电台了');
+      toast(fresh ? '已追加 ' + fresh + ' 座电台' : '没有更多新电台了');
     } catch (err) {
       toast('加载失败，请稍后重试', true);
     } finally {
@@ -313,11 +420,12 @@
   function updateResultMeta() {
     const total = state.stations.length;
     const filtered = getFiltered().length;
+    const catalog = state.catalogTotal ? ' / 目录 <b>' + state.catalogTotal.toLocaleString() + '</b>' : '';
     let html;
-    if (state.favoritesOnly) html = '收藏 <b>' + filtered + '</b> / 已载入 <b>' + total + '</b> 座';
-    else if (state.query) html = '匹配 <b>' + filtered + '</b> / 已载入 <b>' + total + '</b> 座';
-    else if (state.genre || state.country) html = '筛选 <b>' + filtered + '</b> / 已载入 <b>' + total + '</b> 座';
-    else html = '已载入 <b>' + total + '</b> 座电台' + (state.hasMore ? ' · 可继续加载' : '');
+    if (state.favoritesOnly) html = '收藏 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
+    else if (state.query) html = '匹配 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
+    else if (state.genre || state.country) html = '筛选 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
+    else html = '已载入 <b>' + total.toLocaleString() + '</b> 座' + catalog + (state.hasMore ? ' · 可继续加载' : '');
     if (state.dataSource !== 'api') {
       html += ' · 内置目录 <button class="retry-link" type="button">重试连接</button>';
     }
@@ -337,10 +445,9 @@
       if (generation !== searchGeneration) return;
       const incoming = raw.map(normalize).filter(usable);
       if (!incoming.length) return;
-      const known = new Set(state.stations.map((s) => s.id));
-      const fresh = incoming.filter((s) => !known.has(s.id));
-      if (fresh.length) {
-        state.stations = state.stations.concat(fresh);
+      const before = state.stations.length;
+      ingest(incoming, false);
+      if (state.stations.length > before) {
         buildGenreChips();
         buildCountryOptions();
         updateStats();
@@ -352,24 +459,28 @@
   }
 
   /* ---------------- 筛选与排序 ---------------- */
-  function getFiltered() {
-    let list = state.stations;
-    if (state.favoritesOnly) list = list.filter((s) => state.favorites.has(s.id));
+  function applyFilters(list) {
+    let out = list;
+    if (state.favoritesOnly) out = out.filter((s) => state.favorites.has(s.id));
     if (state.genre) {
       const g = state.genre.toLowerCase();
-      list = list.filter((s) => s.tags.some((t) => t.toLowerCase() === g || t.toLowerCase().includes(g)));
+      out = out.filter((s) => s.tags.some((t) => t.toLowerCase() === g || t.toLowerCase().includes(g)));
     }
     if (state.country) {
-      list = list.filter((s) => (s.cc || '') === state.country);
+      out = out.filter((s) => (s.cc || '') === state.country);
     }
     if (state.query) {
       const q = state.query.toLowerCase();
-      list = list.filter((s) => (
+      out = out.filter((s) => (
         s.name + ' ' + s.country + ' ' + s.region + ' ' + s.lang + ' ' + s.tags.join(' ')
       ).toLowerCase().includes(q));
     }
-    return list;
+    return out;
   }
+  // 列表：全量池（含无坐标电台）
+  function getFiltered() { return applyFilters(state.stations); }
+  // 地球：仅带坐标的子集
+  function getGlobeStations() { return applyFilters(state.geoStations); }
   function getSorted(list) {
     const copy = list.slice();
     switch (state.sort) {
@@ -417,7 +528,7 @@
     const el = $('globeContainer');
     flatMap = window.FlatMap({
       container: el,
-      getStations: getFiltered,
+      getStations: getGlobeStations,
       getCurrent: () => state.current,
       onSelect: (s) => { selectStation(s); play(s); },
       heatColor: (votes, isCurrent) => heatColor(votes, isCurrent, 'flat')
@@ -524,7 +635,8 @@
   }
   function updateGlobeData() {
     if (!globeReady || !globe) return;
-    const points = getFiltered().filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
+    // 地球只渲染带坐标的子集（列表仍可查看全部电台）
+    const points = getGlobeStations().filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
     globe.pointsData(points);
     globe.pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id));
     globe.pointAltitude(0.006);
@@ -581,8 +693,9 @@
   }
 
   function updateStats() {
-    $('statStations').textContent = state.stations.length;
+    $('statStations').textContent = state.stations.length.toLocaleString();
     $('statCountries').textContent = new Set(state.stations.map((s) => s.cc).filter(Boolean)).size;
+    $('statGeo').textContent = state.geoStations.length.toLocaleString();
   }
   function renderList() {
     const all = getFiltered();
@@ -755,6 +868,9 @@
         globe.width(el.clientWidth);
         globe.height(el.clientHeight);
       }
+    } else {
+      // 进入列表后立即检查一次，补齐首屏可见数量
+      if (typeof state.pokeScroll === 'function') setTimeout(state.pokeScroll, 60);
     }
   }
   function toggleFav(id) {
@@ -786,6 +902,7 @@
       updateGlobeData();
       renderList();
       updateResultMeta();
+      supplementFilter();
     });
 
     // 内置目录下重试联网
@@ -816,7 +933,7 @@
       renderList();
       updateResultMeta();
       clearTimeout(searchTimer);
-      if (state.query.length >= 2) searchTimer = setTimeout(() => liveSearch(state.query), 480);
+      if (state.query.length >= 2) searchTimer = setTimeout(supplementFilter, 480);
     });
     input.addEventListener('focus', renderSuggestions);
     input.addEventListener('keydown', (e) => {
@@ -885,17 +1002,47 @@
       updateGlobeData();
       renderList();
       updateResultMeta();
+      supplementFilter();
     });
 
     // 加载更多 / 排序
     $('loadMore').addEventListener('click', () => {
       if (state.visibleCount < getSorted(getFiltered()).length) {
-        state.visibleCount += 30;
+        state.visibleCount += 120;
         renderList();
       } else {
         loadMoreStations();
       }
     });
+
+    // 无限滚动：接近底部时先展开已载入内容，再自动向目录取下一批。
+    // 用滚动位置判断而非 IntersectionObserver，切换视图后也能立即生效。
+    let scrollTick = false;
+    const onListScroll = () => {
+      if (scrollTick) return;
+      scrollTick = true;
+      requestAnimationFrame(() => {
+        scrollTick = false;
+        if (state.view !== 'list' || state.loadingMore) return;
+        const btn = $('loadMore');
+        if (btn.hidden) return;
+        if (btn.getBoundingClientRect().top > window.innerHeight + 320) return;
+        const sorted = getSorted(getFiltered());
+        if (state.visibleCount < sorted.length) {
+          state.visibleCount += 120;
+          renderList();
+          return;
+        }
+        // 仅在未筛选时自动翻页，避免筛选结果为空时反复请求
+        const unfiltered = !state.query && !state.genre && !state.country && !state.favoritesOnly;
+        if (unfiltered && state.hasMore && Date.now() - autoLoadAt > 1200) {
+          autoLoadAt = Date.now();
+          loadMoreStations();
+        }
+      });
+    };
+    state.pokeScroll = onListScroll;
+    document.addEventListener('scroll', onListScroll, { capture: true, passive: true });
     $('sortSelect').addEventListener('change', (e) => { state.sort = e.target.value; renderList(); });
 
     // 播放器

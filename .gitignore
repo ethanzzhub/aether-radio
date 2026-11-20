@@ -28,3 +28,6 @@ npm-debug.log*
 
 # 本地工具数据
 .workbuddy/
+
+# 本地服务日志
+.logs/

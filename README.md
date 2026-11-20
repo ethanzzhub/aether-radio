@@ -12,7 +12,7 @@
 - **3D 地球**：可拖拽旋转、滚轮/双指缩放、空闲自动旋转。电台以贴地光点呈现，按热度做暗铜到亮金的颜色渐变，当前播放台显示脉冲环。
 - **坐标补全与置信度**：目录原始只有约 1.1 万座带坐标；构建时用 GeoNames 地名数据把其余电台补到 97.8% 可定位，并按可信度标记来源（`original` / `city` / `admin1` / `country`）。推算点在地球与 2D 地图上更小、更灰，详情与悬浮提示会注明「位置估算」；右上角「估算位置」开关可一键隐藏推算点，只看真实坐标。真实坐标与推算坐标在统计中分开计数。
 - **全量目录**：列表加载全部电台（含无坐标），滚动到底自动继续拉取；状态栏实时显示「已载入 X / 目录 52,981」。
-- **2D 兼容地图**：检测到浏览器无 WebGL（硬件加速关闭、远程桌面、旧显卡等）时自动降级为 Canvas 绘制的等距圆柱投影世界地图，功能与 3D 一致。右上角可手动切换 3D / 2D。
+- **3D / 2D / 卫星三种地图**：右上角可切换。3D 为 globe.gl 地球；2D 为无 WebGL 时自动降级的 Canvas 世界地图；**卫星模式用 MapLibre 5.x globe 投影 + Esri World Imagery 免费卫星瓦片（与 radio.garden 同款做法），可一路放大到城市街道级**，电台光点覆盖在卫星影像上，点击即可收听。三种模式共用同一份电台数据与详情/播放状态。
 - **电台列表**：网格列表，支持按投票数、收听数、名称、码率排序，并可分批从全球目录继续加载。
 - **国家筛选**：列表头部按国家下拉筛选，选项由已加载电台动态聚合，附带国旗与中文国名及数量；切换筛选时会向目录补全对应国家的电台，而非只筛本地已载入的部分。
 - **搜索与筛选**：输入即过滤（名称、国家、地区、语言、风格标签），并同时以「电台名」和「风格标签」两种方式向目录检索，因此 `jazz`、`reggae` 这类流派词也能命中；顶部提供热门风格快捷筛选，所有筛选条件可叠加使用。
@@ -56,8 +56,9 @@ python3 -m http.server 8765
 | 界面 | 原生 HTML / CSS，无框架、无构建步骤 |
 | 3D 地球 | [globe.gl](https://github.com/vasturiano/globe.gl) 2.41.4（Three.js），本地化于 `vendor/` |
 | 2D 备用地图 | 原生 Canvas 2D，自绘 Natural Earth 110m 陆地轮廓 |
-| 数据 | [Radio Browser](https://www.radio-browser.info/) 公共 API，无需密钥 |
-| 持久化 | `localStorage`（收藏、音量） |
+| 卫星地球 | [MapLibre GL JS](https://maplibre.org/) 5.23.0（globe 投影）+ Esri World Imagery 卫星瓦片，均本地化于 `vendor/`；瓦片运行时从 Esri 拉取、无需 API key |
+| 数据 | [Radio Browser](https://www.radio-browser.info/) 公共目录 + GeoNames 地名数据，离线封装于 `data/` |
+| 持久化 | 本地服务落盘 + `localStorage` 回退 |
 
 设计上采用「声学地图集」方向：暖白纸面色板、深墨蓝文字、琥珀强调色，Fraunces 衬线标题搭配 DM Sans 正文，叠加经纬网格纹理。全部正文配色满足 WCAG AA 对比度。
 
@@ -116,6 +117,7 @@ https://de1.api.radio-browser.info/json/stats
 ├── js/
 │   ├── app.js                # 状态管理、数据加载、播放器、视图切换
 │   ├── flat-map.js           # 2D 兼容地图（Canvas）
+│   ├── satellite-map.js      # 卫星地球（MapLibre + Esri 瓦片）
 │   ├── world-geo.js          # 世界陆地轮廓数据
 │   ├── builtin-stations.js   # 内置 620 座电台目录
 │   └── fallback.js           # 最小回退数据集
@@ -129,7 +131,8 @@ https://de1.api.radio-browser.info/json/stats
 │       ├── cities15000.txt
 │       └── admin1CodesASCII.txt
 ├── vendor/
-│   └── globe.gl.min.js       # 3D 地球库
+│   ├── globe.gl.min.js       # 3D 地球库
+│   └── maplibre-gl.js/.css   # 卫星地球库（5.23.0）
 ├── assets/
 │   ├── earth-blue-marble.jpg # 地球贴图
 │   ├── earth-topology.png    # 地形凹凸贴图
@@ -155,6 +158,7 @@ https://de1.api.radio-browser.info/json/stats
 - **预览面板的 CSP**：部分 IDE 或文档预览器会注入 `Content-Security-Policy`，拦截对外部 API 的请求。由于默认读取同源的本地目录，这种情况不再影响浏览与播放；若连本地目录也无法读取，才会退回内置的 620 座目录。
 - **公共流稳定性**：Radio Browser 的「最后检查正常」标记存在滞后，抽样约 70% 的流可即时连通。换台即可，不影响应用本身。
 - **推算坐标的局限**：地名匹配的坐标只能定位到城市、州/省或国家，`country` 级做了小幅抖动用于示意，**不代表电台的真实发射位置**；详情与悬浮提示会明确标注。侧栏「精确坐标」只计目录直接提供的 1.1 万座，悬停可看推算数。约 1,178 座连国家码都缺失的电台仍无坐标，只在列表中展示，可搜索、筛选、收藏与播放。
+- **卫星瓦片依赖网络**：卫星模式的影像运行时从 Esri 拉取，需要联网；断网或 CSP 拦截外部图片时该模式会空白，此时用 3D / 2D 模式（底图与电台数据全本地）。卫星地图需要 WebGL2，不支持时按钮会提示并阻止切换。影像版权归 Esri / Maxar，详见地图右下角署名。
 
 ## 许可
 

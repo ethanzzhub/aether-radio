@@ -302,6 +302,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 #globeContainer { position: absolute; inset: 0; }
 /* 浅色背景下轻微提亮地球，避免整体过暗 */
 #globeContainer canvas { display: block; filter: brightness(1.1) saturate(0.92); }
+/* 卫星瓦片保持原始色彩，不套用地球的调色滤镜 */
+#globeContainer .aether-satellite canvas { filter: none; }
+.aether-satellite .maplibregl-ctrl-attrib { font-size: 10px; opacity: .75; }
 .globe-vignette {
   position: absolute; inset: 0; pointer-events: none;
   box-shadow: inset 0 0 110px 20px var(--paper);

@@ -63,6 +63,7 @@
   let globe = null;
   let globeReady = false;
   let flatMap = null;
+  let satMap = null;       // MapLibre 卫星地球（独立模式，不影响 3D/2D）
   let rotateTimer = null;
   let searchTimer = null;
   let toastTimer = null;
@@ -670,7 +671,17 @@
     state.mapMode = mode;
     document.querySelectorAll('#mapModeSwitch button').forEach((b) =>
       b.classList.toggle('is-active', b.dataset.mode === mode));
-    if (mode === '2d') {
+    const isSat = mode === 'satellite';
+    $('globeContainer').style.display = isSat ? 'none' : '';
+    $('satelliteContainer').style.display = isSat ? '' : 'none';
+    if (isSat) {
+      if (!satMap) initSatMap();
+      if (globeReady && globe && globe.controls()) globe.controls().autoRotate = false;
+      if (flatMap) flatMap.hide();
+      if (satMap) { satMap.show(); satMap.refresh(); }
+      $('globeGuide').lastChild.textContent = ' 拖动旋转 · 滚轮缩放至城市 · 点击光点收听';
+    } else if (mode === '2d') {
+      if (satMap) satMap.hide();
       // 手动切到 2D 时地球可能从未降级过，这里按需初始化
       if (!flatMap) initFlatMap();
       if (globeReady && globe) {
@@ -680,6 +691,7 @@
       if (flatMap) { flatMap.show(); flatMap.refresh(); }
       $('globeGuide').lastChild.textContent = ' 拖动平移 · 滚轮缩放 · 点击光点收听';
     } else {
+      if (satMap) satMap.hide();
       if (flatMap) flatMap.hide();
       if (globeReady && globe) {
         globe.renderer().domElement.style.display = '';
@@ -690,6 +702,23 @@
       $('globeGuide').lastChild.textContent = window.matchMedia('(pointer: coarse)').matches
         ? ' 拖动旋转 · 双指缩放 · 点击光点收听'
         : ' 拖动旋转 · 滚轮缩放 · 点击光点收听';
+    }
+  }
+  function initSatMap() {
+    if (satMap) return;
+    const el = $('satelliteContainer');
+    satMap = window.SatelliteMap({
+      container: el,
+      getStations: getGlobeStations,
+      getCurrent: () => state.current,
+      onSelect: (s) => { selectStation(s); play(s); focusGlobe(s); },
+      onStatus: (status, msg) => {
+        if (status === 'tile-error') toast(msg, true);
+      }
+    });
+    if (satMap) {
+      satMap.refresh();
+      window.__satMap = satMap.map;  // 便于调试与自动化验证
     }
   }
   function initFlatMap() {
@@ -840,9 +869,14 @@
     globe.pointRadius((d) => pointRadius(d));
     globe.ringsData(state.current && Number.isFinite(state.current.lat) ? [state.current] : []);
     if (flatMap && state.mapMode === '2d') flatMap.refresh();
+    if (satMap && state.mapMode === 'satellite') satMap.refresh();
   }
   function focusGlobe(s) {
     if (state.mapMode === '2d') return;
+    if (state.mapMode === 'satellite') {
+      if (satMap) satMap.focus(s);
+      return;
+    }
     if (!globeReady || !globe || !Number.isFinite(s.lat)) return;
     globe.pointOfView({ lat: s.lat, lng: s.lng, altitude: 1.55 }, 950);
   }
@@ -1274,6 +1308,10 @@
     });
     $('resetGlobe').addEventListener('click', () => {
       if (state.mapMode === '2d') { if (flatMap) flatMap.reset(); return; }
+      if (state.mapMode === 'satellite') {
+        if (satMap) satMap.map.flyTo({ center: [12, 30], zoom: 1.6, duration: 900 });
+        return;
+      }
       if (!globeReady || !globe) return;
       globe.pointOfView({ lat: 20, lng: 12, altitude: window.innerWidth < 760 ? 2.7 : 2.1 }, 900);
     });
@@ -1282,6 +1320,10 @@
       if (!btn) return;
       if (btn.dataset.mode === '3d' && !globeReady) {
         toast('当前浏览器无法运行 3D 地球', true);
+        return;
+      }
+      if (btn.dataset.mode === 'satellite' && !hasWebGL()) {
+        toast('当前浏览器无法运行卫星地图（需要 WebGL）', true);
         return;
       }
       setMapMode(btn.dataset.mode);

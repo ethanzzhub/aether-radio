@@ -11,6 +11,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
 </head>
 <body>
 <div class="app" id="app">
@@ -67,11 +68,13 @@
     <section class="view view-globe is-active" id="globeView" aria-label="地球电台地图">
       <div class="globe-stage" id="globeStage">
         <div id="globeContainer"></div>
+        <div id="satelliteContainer" style="position:absolute;inset:0;display:none"></div>
         <div class="globe-vignette" aria-hidden="true"></div>
         <div class="globe-compass" aria-hidden="true"><span>N</span></div>
         <div class="map-mode-switch" id="mapModeSwitch" role="group" aria-label="地图模式">
           <button data-mode="3d" class="is-active" type="button" title="3D 地球">3D</button>
           <button data-mode="2d" type="button" title="2D 地图（兼容模式）">2D</button>
+          <button data-mode="satellite" type="button" title="卫星地球（可放大到城市）">卫星</button>
         </div>
         <label class="estimate-toggle" id="estimateToggle" title="推算坐标来自地名匹配，位置为近似值">
           <input type="checkbox" id="showEstimated" checked>
@@ -198,8 +201,10 @@
 </div>
 
 <script src="vendor/globe.gl.min.js"></script>
+<script src="vendor/maplibre-gl.js"></script>
 <script src="js/world-geo.js"></script>
 <script src="js/flat-map.js"></script>
+<script src="js/satellite-map.js"></script>
 <script src="js/builtin-stations.js"></script>
 <script src="js/fallback.js"></script>
 <script src="js/app.js"></script>

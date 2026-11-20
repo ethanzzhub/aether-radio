@@ -62,7 +62,26 @@ python3 -m http.server 8765
 
 ## 数据源说明
 
-应用通过 Radio Browser 的公开镜像获取电台目录：
+### 本地目录（默认，离线可用）
+
+`data/catalog.json` 是一份**从源头拉取并清洗过的完整目录**，应用启动时会优先加载它，加载成功即不再访问任何外部 API。因此即使断网、在 CSP 受限的预览面板里、或部署到任何静态托管，都能浏览和播放全量电台。
+
+- 文件由 `scripts/build_catalog.py` 生成：从 Radio Browser 公共目录分页拉取全量电台，去重、去控制字符、丢弃无效流、校验坐标、统一编码、HTTPS 优先、标签限量后写入。
+- 当前快照：**53,186 座 / 224 国**，其中带坐标 11,060 座、HTTPS 流 34,657 座，体积约 24 MB。
+- 文件的 `meta` 段记录生成时间、来源总量、各项清洗统计，状态栏会显示生成日期。
+- 重新生成（需要联网）：
+
+```bash
+python3 scripts/build_catalog.py             # 全量
+python3 scripts/build_catalog.py --limit 10000  # 只取前 1 万（调试）
+python3 scripts/build_catalog.py --from-cache  # 用上次的原始缓存重跑清洗
+```
+
+radio.garden 等站点的数据同样源自这类社区公共目录；直连其站点会被 Cloudflare 拦截，所以这里从源头取数并自行策展。
+
+### 在线目录（本地文件缺失时回退）
+
+若 `data/catalog.json` 不存在或读取失败，应用会退回原来的在线获取方式，通过 Radio Browser 的公开镜像获取电台目录：
 
 ```
 # 列表分页：全量，不限制坐标
@@ -96,6 +115,11 @@ https://de1.api.radio-browser.info/json/stats
 │   ├── world-geo.js          # 世界陆地轮廓数据
 │   ├── builtin-stations.js   # 内置 620 座电台目录
 │   └── fallback.js           # 最小回退数据集
+├── data/
+│   ├── catalog.json          # 本地全量目录（53,186 座，默认数据源）
+│   └── catalog.raw.json      # 构建用原始缓存（.gitignore）
+├── scripts/
+│   └── build_catalog.py      # 拉取 + 清洗 + 生成本地目录
 ├── vendor/
 │   └── globe.gl.min.js       # 3D 地球库
 ├── assets/
@@ -120,7 +144,7 @@ https://de1.api.radio-browser.info/json/stats
 ## 已知限制
 
 - **HTTPS 与 HTTP 流**：浏览器禁止 HTTPS 页面加载 HTTP 音频流。部署在 HTTPS 时会自动过滤这类电台，可用数量约为全部的三分之二。本地 `http://localhost` 不受影响。
-- **预览面板的 CSP**：部分 IDE 或文档预览器会注入 `Content-Security-Policy`，拦截对外部 API 的请求。此时应用会启用内置目录并提示，完整体验请在真实浏览器中打开。
+- **预览面板的 CSP**：部分 IDE 或文档预览器会注入 `Content-Security-Policy`，拦截对外部 API 的请求。由于默认读取同源的本地目录，这种情况不再影响浏览与播放；若连本地目录也无法读取，才会退回内置的 620 座目录。
 - **公共流稳定性**：Radio Browser 的「最后检查正常」标记存在滞后，抽样约 70% 的流可即时连通。换台即可，不影响应用本身。
 - **无坐标电台**：约 4 万座电台未提供经纬度，无法绘制在地球上，但**会在列表中完整展示**，可搜索、筛选、收藏与播放。地球状态栏的「可定位」即为当前可用于地球的数量。
 

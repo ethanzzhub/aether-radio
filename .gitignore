@@ -34,3 +34,6 @@ npm-debug.log*
 
 # 本地共享状态（收藏等）
 .data/
+
+# 目录构建的原始拉取缓存（体积大，可随时重新拉取）
+data/catalog.raw.json

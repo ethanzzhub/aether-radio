@@ -46,8 +46,9 @@
     favorites: new Set(readJSON('aether:favorites', [])),
     volume: Number(readJSON('aether:volume', 0.8)),
     lastStationId: null,
-    dataSource: 'api',
-    initialLimit: 1000,    // 首屏加载量（目录总量 5 万+）
+    dataSource: 'api',     // local | api | builtin | fallback
+    localMeta: null,       // 本地目录的生成时间与统计
+    initialLimit: 3000,    // 首屏加载量（目录总量 5 万+）
     pageSize: 1000,        // 每次「加载更多」从目录追加的数量
     codecSupport: {},
     mapMode: 'auto',       // auto | 3d | 2d
@@ -353,6 +354,37 @@
     }
   }
 
+  // 本地目录优先：从源头（Radio Browser）拉取并清洗后落盘的完整目录。
+  // 同源 JSON，不受外部 API 的 CSP / 网络限制；加载后即可离线浏览全部电台。
+  async function loadLocalCatalog(force) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), force ? 20000 : 6000);
+    try {
+      const res = await fetch('data/catalog.json?t=' + Date.now(), {
+        cache: 'no-store', signal: ctrl.signal
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const payload = await res.json();
+      if (!payload || !Array.isArray(payload.stations) || !payload.stations.length) {
+        throw new Error('本地目录为空');
+      }
+      const list = payload.stations.map(normalize).filter(usable);
+      if (!list.length) throw new Error('本地目录无可用电台');
+      ingest(list, true);
+      state.dataSource = 'local';
+      state.hasMore = false;          // 全量已在本地，无需从网络翻页
+      state.searchHasMore = false;
+      state.catalogTotal = Number(payload.meta && payload.meta.kept) || list.length;
+      state.localMeta = payload.meta || null;
+      lastLoadBlocked = false;
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // 目录总量（用于状态栏展示「/ 目录 52,981」）
   async function loadCatalogTotal() {
     try {
@@ -366,29 +398,33 @@
 
   async function loadStations() {
     const started = performance.now();
-    try {
-      // 主请求不带坐标限制：列表需要全部电台
-      const raw = await apiGet('/json/stations/search', {
-        hidebroken: 'true',
-        order: 'votes',
-        reverse: 'true',
-        limit: String(state.initialLimit)
-      }, 20000);
-      if (!raw.length) throw new Error('空结果');
-      ingest(raw.map(normalize).filter(usable), true);
-      state.dataSource = 'api';
-      state.nextOffset = raw.length;
-      state.hasMore = true;
-      lastLoadBlocked = false;
-    } catch (err) {
-      // 极短时间内的失败通常是 CSP / 本地策略直接拦截，而非真实网络超时
-      const elapsed = performance.now() - started;
-      lastLoadBlocked = elapsed < 500;
-      const builtin = (window.BUILTIN_STATIONS || []).map(normalize).filter(usable);
-      const fallback = (window.FALLBACK_STATIONS || []).map(normalize).filter(usable);
-      ingest(builtin.length ? builtin : fallback, true);
-      state.dataSource = builtin.length ? 'builtin' : 'fallback';
-      state.hasMore = false;
+    // 第一优先：同源本地目录（完整、离线可用、不受 CSP 与网络影响）
+    const localOK = await loadLocalCatalog(false);
+    if (!localOK) {
+      try {
+        // 主请求不带坐标限制：列表需要全部电台
+        const raw = await apiGet('/json/stations/search', {
+          hidebroken: 'true',
+          order: 'votes',
+          reverse: 'true',
+          limit: String(state.initialLimit)
+        }, 20000);
+        if (!raw.length) throw new Error('空结果');
+        ingest(raw.map(normalize).filter(usable), true);
+        state.dataSource = 'api';
+        state.nextOffset = raw.length;
+        state.hasMore = true;
+        lastLoadBlocked = false;
+      } catch (err) {
+        // 极短时间内的失败通常是 CSP / 本地策略直接拦截，而非真实网络超时
+        const elapsed = performance.now() - started;
+        lastLoadBlocked = elapsed < 500;
+        const builtin = (window.BUILTIN_STATIONS || []).map(normalize).filter(usable);
+        const fallback = (window.FALLBACK_STATIONS || []).map(normalize).filter(usable);
+        ingest(builtin.length ? builtin : fallback, true);
+        state.dataSource = builtin.length ? 'builtin' : 'fallback';
+        state.hasMore = false;
+      }
     }
     if (!state.stations.length) {
       ingest((window.BUILTIN_STATIONS || window.FALLBACK_STATIONS || []).map(normalize), true);
@@ -401,6 +437,10 @@
     updateGlobeData();
     renderList();
     updateResultMeta();
+    if (state.dataSource === 'local') {
+      toast('已载入本地目录 ' + state.stations.length.toLocaleString() + ' 座电台');
+      return;
+    }
     if (state.dataSource !== 'api') {
       toast(lastLoadBlocked
         ? '所在环境限制了外部数据请求，已启用内置 ' + state.stations.length + ' 座电台'
@@ -452,8 +492,8 @@
         has_geo_info: 'true',
         order: 'votes',
         reverse: 'true',
-        limit: '3000'
-      }, 25000);
+        limit: '8000'
+      }, 30000);
       if (!Array.isArray(raw) || !raw.length) return;
       const valid = raw.map(normalize).filter(usable);
       let added = 0;
@@ -541,13 +581,18 @@
     else if (state.query) html = '匹配 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
     else if (state.genre || state.country) html = '筛选 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
     else html = '已载入 <b>' + total.toLocaleString() + '</b> 座' + catalog + (state.hasMore ? ' · 可继续加载' : '');
-    if (state.dataSource !== 'api') {
+    if (state.dataSource === 'local') {
+      const g = state.localMeta && state.localMeta.generatedAt;
+      const built = g ? String(g).slice(0, 10) : '';
+      html += ' · 本地目录' + (built ? ' <span class="meta-date">' + built + ' 生成</span>' : '');
+    } else if (state.dataSource !== 'api') {
       html += ' · 内置目录 <button class="retry-link" type="button">重试连接</button>';
     }
     $('resultMeta').innerHTML = html;
   }
 
   async function liveSearch(query) {
+    if (state.dataSource !== 'api') return;  // 本地目录已全量，本地过滤即可
     const generation = ++searchGeneration;
     try {
       const raw = await apiGet('/json/stations/search', {
@@ -673,10 +718,10 @@
         .pointLat((d) => d.lat)
         .pointLng((d) => d.lng)
         .pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id))
-        // 圆点而非圆柱：高度收到贴地（0.001 只为避免与球面 z-fighting），
-        // 半径保持，视觉上就是一枚平铺在地表上的圆点
-        .pointAltitude(0.001)
-        .pointRadius((d) => (state.current && d.id === state.current.id) ? 0.46 : 0.26)
+        // 圆点而非圆柱：几何体已改为贴地的圆形面片（无厚度/高度），
+        // altitude 直接取 0，圆点贴合在地球表面。
+        .pointAltitude(0)
+        .pointRadius((d) => pointRadius(d))
         // 分段数太低时圆点在放大后会变成多边形，24 段足够圆
         .pointResolution(24)
         .pointLabel((d) => globeTip(d))
@@ -698,8 +743,11 @@
       controls.autoRotateSpeed = 0.32;
       controls.enableDamping = true;
       controls.dampingFactor = 0.08;
-      controls.minDistance = 120;
-      controls.maxDistance = 620;
+      // 相机距离以地球半径（100）为基准：minDistance 贴近地表（≈ 半径 4% 高度），
+      // 对标 radio.garden 可放大到城市级分辨单个电台；maxDistance 限制拉远后的视图。
+      controls.minDistance = 103;
+      controls.maxDistance = 500;
+      controls.zoomSpeed = 0.6;
 
       const pauseRotate = () => {
         controls.autoRotate = false;
@@ -734,12 +782,16 @@
       toast('3D 地球初始化失败，已切换为 2D 地图', true);
     }
   }
+  // 热度归一化：对数刻度压缩长尾，0 票 → 0，高热度 → 1。
+  function heatNorm(votes) {
+    return Math.min(1, Math.log10(1 + (votes || 0)) / Math.log10(1 + 300000));
+  }
   // 热度配色：低热度偏沉、高热度偏亮。
   // variant='flat' 用于浅色 2D 地图（深色系），默认用于深色地球贴图（亮色系）。
   function heatColor(votes, isCurrent, variant) {
     const flat = variant === 'flat';
     if (isCurrent) return flat ? '#b03a12' : '#ff8a5c';
-    const t = Math.min(1, Math.log10(1 + (votes || 0)) / Math.log10(1 + 300000));
+    const t = heatNorm(votes);
     const stops = flat
       ? [[178, 136, 76], [156, 98, 42], [132, 62, 28], [104, 38, 20]]
       : [[198, 158, 94], [234, 190, 110], [252, 216, 136], [255, 244, 208]];
@@ -747,6 +799,13 @@
     const local = t * (stops.length - 1) - seg;
     const a = stops[seg], b = stops[seg + 1];
     return 'rgb(' + a.map((v, i) => Math.round(v + (b[i] - v) * local)).join(',') + ')';
+  }
+  // 圆点半径（角度度）：对标 radio.garden，热度越高圆点越大、越亮；
+  // 低热度小点不喧宾夺主，高热度台自然成为视觉焦点。当前播放台单独放大。
+  function pointRadius(d) {
+    if (state.current && d.id === state.current.id) return 0.5;
+    const t = heatNorm(d.votes);
+    return 0.16 + t * 0.34;   // 0.16° ~ 0.50°
   }
   function globeTip(d) {
     return '<div class="globe-tip">' + logoHTML(d)
@@ -760,8 +819,8 @@
     const points = getGlobeStations().filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
     globe.pointsData(points);
     globe.pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id));
-    globe.pointAltitude(0.006);
-    globe.pointRadius((d) => (state.current && d.id === state.current.id) ? 0.5 : 0.3);
+    globe.pointAltitude(0);
+    globe.pointRadius((d) => pointRadius(d));
     globe.ringsData(state.current && Number.isFinite(state.current.lat) ? [state.current] : []);
     if (flatMap && state.mapMode === '2d') flatMap.refresh();
   }

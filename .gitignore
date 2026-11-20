@@ -31,3 +31,6 @@ npm-debug.log*
 
 # 本地服务日志
 .logs/
+
+# 本地共享状态（收藏等）
+.data/

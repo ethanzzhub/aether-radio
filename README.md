@@ -1,6 +1,6 @@
 # AETHER · 全球电波地图
 
-在三维地球上探索并收听来自世界各地的电台。纯前端实现，无需构建、无需后端，桌面 Web 与移动端 H5 自适应。
+在三维地球上探索并收听来自世界各地的电台。纯前端实现，无需构建，桌面 Web 与移动端 H5 自适应。收藏与设置由内置的极简本地服务（`server.py`，仅标准库）落到磁盘，本机任意浏览器打开都是同一份数据。
 
 [![HTML5](https://img.shields.io/badge/HTML5-E34F26?logo=html5&logoColor=white)](#)
 [![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?logo=javascript&logoColor=black)](#)
@@ -15,7 +15,7 @@
 - **电台列表**：网格列表，支持按投票数、收听数、名称、码率排序，并可分批从全球目录继续加载。
 - **国家筛选**：列表头部按国家下拉筛选，选项由已加载电台动态聚合，附带国旗与中文国名及数量；切换筛选时会向目录补全对应国家的电台，而非只筛本地已载入的部分。
 - **搜索与筛选**：输入即过滤（名称、国家、地区、语言、风格标签），并同时以「电台名」和「风格标签」两种方式向目录检索，因此 `jazz`、`reggae` 这类流派词也能命中；顶部提供热门风格快捷筛选，所有筛选条件可叠加使用。
-- **收藏**：一键收藏，写入 `localStorage` 持久化，支持「只看收藏」模式。
+- **收藏**：一键收藏，支持「只看收藏」模式。默认由本地服务写入 `.data/state.json`，换浏览器也能读到同一份收藏；没有该接口时自动退回 `localStorage`。
 - **播放器**：播放/暂停、上一台/下一台、音量记忆、加载与断流提示。
 - **格式自适应**：用 `audio.canPlayType()` 探测本机浏览器对 MP3 / AAC / OGG / Opus / FLAC 的支持，加载时自动剔除无法解码的电台。
 - **离线兜底**：内置 620 座真实电台（覆盖 112 国，HTTPS 流 + 地理坐标），网络或策略受限时仍可完整浏览与收听。
@@ -28,14 +28,25 @@
 git clone https://github.com/<your-name>/<your-repo>.git
 cd <your-repo>
 
-# 方式一：Python 内置服务器
-python3 -m http.server 8765
+# 推荐：带共享状态存储的本地服务（收藏/设置跨浏览器一致）
+python3 server.py            # 等价于 npm start
 
-# 方式二：Node
-npm start
+# 纯静态：也能跑，但收藏只存在当前浏览器的 localStorage 里
+python3 -m http.server 8765
 ```
 
 然后访问 <http://localhost:8765>。
+
+### 收藏与设置的存储位置
+
+`server.py` 提供两个接口，数据落在项目根目录的 `.data/state.json`（已加入 `.gitignore`）：
+
+| 接口 | 作用 |
+| --- | --- |
+| `GET /api/state` | 读取收藏、音量、排序、上次收听的电台 |
+| `PUT /api/state` | 整体写入，先写临时文件再原子替换，避免半截 JSON |
+
+前端启动时先读一次 `/api/state`；如果读不到（纯静态托管、`file://` 打开或部署到 GitHub Pages），就退回 `localStorage`，功能不受影响。多开浏览器时会话切回前台会自动比对 `updatedAt` 再同步一次。
 
 ## 技术栈
 
@@ -76,6 +87,7 @@ https://de1.api.radio-browser.info/json/stats
 ```
 .
 ├── index.html                # 页面结构
+├── server.py                 # 极简本地服务：静态文件 + /api/state
 ├── css/
 │   └── style.css             # 设计令牌、布局、响应式
 ├── js/
@@ -90,6 +102,7 @@ https://de1.api.radio-browser.info/json/stats
 │   ├── earth-blue-marble.jpg # 地球贴图
 │   ├── earth-topology.png    # 地形凹凸贴图
 │   └── favicon.svg
+├── .data/                    # 运行时生成：state.json（收藏与设置）
 └── package.json
 ```
 

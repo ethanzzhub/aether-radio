@@ -45,6 +45,7 @@
     loading: false,
     favorites: new Set(readJSON('aether:favorites', [])),
     volume: Number(readJSON('aether:volume', 0.8)),
+    lastStationId: null,
     dataSource: 'api',
     initialLimit: 1000,    // 首屏加载量（目录总量 5 万+）
     pageSize: 1000,        // 每次「加载更多」从目录追加的数量
@@ -78,6 +79,107 @@
   }
   function saveJSON(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* 隐私模式下忽略 */ }
+  }
+
+  /* ---------------- 跨浏览器共享状态 ----------------
+     本地服务（server.py）提供 /api/state 读写，数据落在项目根目录 .data/state.json，
+     所以 Chrome / Safari / Edge 打开同一个 localhost 地址看到的是同一份收藏与设置。
+     没有该接口时（file:// 打开或部署到静态托管）自动退回 localStorage。 */
+  const STATE_API = '/api/state';
+
+  const store = {
+    online: false,
+    timer: null,
+    stamp: '',
+    payload() {
+      return {
+        favorites: Array.from(state.favorites),
+        volume: state.volume,
+        lastStation: state.current ? state.current.id : state.lastStationId,
+        sort: state.sort
+      };
+    },
+    async read() {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 2500);
+        const res = await fetch(STATE_API, { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data && typeof data === 'object' ? data : null;
+      } catch (_) {
+        return null;
+      }
+    },
+    async init() {
+      const data = await store.read();
+      if (!data) { store.online = false; return; }
+      store.online = true;
+      const keys = Object.keys(data).filter((k) => k !== 'updatedAt');
+      if (!keys.length) { store.send(); return; }  // 服务端还没写过：把本机已有的写进去
+      const remoteFavs = Array.isArray(data.favorites) ? data.favorites : [];
+      // 服务端收藏为空但本机有：多半是另一个浏览器先初始化了空文件，
+      // 这时以本机为准补写上去，避免「明明收藏过却读不到」
+      if (!remoteFavs.length && state.favorites.size) { store.send(); return; }
+      store.stamp = String(data.updatedAt || '');
+      applyRemote(data);
+    },
+    push() {
+      if (!store.online) return;
+      clearTimeout(store.timer);
+      store.timer = setTimeout(store.send, 260);
+    },
+    async send() {
+      if (!store.online) return;
+      clearTimeout(store.timer);
+      try {
+        const res = await fetch(STATE_API, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(store.payload()),
+          keepalive: true
+        });
+        if (res.ok) {
+          const echo = await res.json().catch(() => null);
+          if (echo && echo.updatedAt) store.stamp = String(echo.updatedAt);
+        }
+      } catch (_) {
+        store.online = false;  // 服务没开就静默退回 localStorage
+      }
+    },
+    // 切换回窗口时同步一次，多个浏览器同时开着也不会各写各的
+    async refresh() {
+      if (!store.online || document.visibilityState !== 'visible') return;
+      const data = await store.read();
+      if (!data) return;
+      const stamp = String(data.updatedAt || '');
+      if (stamp && stamp === store.stamp) return;
+      store.stamp = stamp;
+      applyRemote(data);
+    }
+  };
+
+  function applyRemote(data) {
+    if (Array.isArray(data.favorites)) {
+      state.favorites = new Set(data.favorites.filter((id) => typeof id === 'string'));
+      saveJSON('aether:favorites', Array.from(state.favorites));
+    }
+    const vol = Number(data.volume);
+    if (Number.isFinite(vol) && vol >= 0 && vol <= 1) {
+      state.volume = vol;
+      audio.volume = vol;
+      saveJSON('aether:volume', vol);
+      $('volume').value = vol;
+      $('volNum').textContent = Math.round(vol * 100);
+    }
+    if (typeof data.sort === 'string' && ['votes', 'clickcount', 'name', 'bitrate'].includes(data.sort)) {
+      state.sort = data.sort;
+      $('sortSelect').value = data.sort;
+      renderList();
+    }
+    if (typeof data.lastStation === 'string') state.lastStationId = data.lastStation;
+    updateFavoriteUI();
   }
   function esc(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({
@@ -817,6 +919,8 @@
       return;
     }
     state.current = s;
+    state.lastStationId = s.id;
+    store.push();
     selectStation(s);
     updatePlayerTrack();
     audio.src = s.url;
@@ -903,6 +1007,7 @@
       toast('已加入收藏');
     }
     saveJSON('aether:favorites', Array.from(state.favorites));
+    store.push();
     updateFavoriteUI();
     if (state.favoritesOnly) { updateGlobeData(); renderList(); }
   }
@@ -1062,7 +1167,7 @@
     };
     state.pokeScroll = onListScroll;
     document.addEventListener('scroll', onListScroll, { capture: true, passive: true });
-    $('sortSelect').addEventListener('change', (e) => { state.sort = e.target.value; renderList(); });
+    $('sortSelect').addEventListener('change', (e) => { state.sort = e.target.value; renderList(); store.push(); });
 
     // 播放器
     $('playBtn').addEventListener('click', () => {
@@ -1082,6 +1187,7 @@
       audio.volume = state.volume;
       $('volNum').textContent = Math.round(state.volume * 100);
       saveJSON('aether:volume', state.volume);
+      store.push();
     });
     $('resetGlobe').addEventListener('click', () => {
       if (state.mapMode === '2d') { if (flatMap) flatMap.reset(); return; }
@@ -1127,6 +1233,18 @@
     });
   }
 
+  // 还原上次收听的电台：只恢复选中态，不自动播放（浏览器禁止无手势自动播放）
+  function restoreLastStation() {
+    if (!state.lastStationId) return;
+    const s = state.stations.find((x) => x.id === state.lastStationId);
+    if (!s || !s.url) return;
+    state.current = s;
+    selectStation(s);
+    updatePlayerTrack();
+    audio.src = s.url;
+    updatePlayState();
+  }
+
   /* ---------------- 启动 ---------------- */
   async function boot() {
     state.codecSupport = buildCodecSupport();
@@ -1138,8 +1256,11 @@
       $('globeGuide').lastChild.textContent = ' 拖动旋转 · 双指缩放 · 点击光点收听';
     }
     wireEvents();
+    await store.init();
     initGlobe();
     await loadStations();
+    restoreLastStation();
+    document.addEventListener('visibilitychange', () => { store.refresh(); });
     setTimeout(() => $('boot').classList.add('is-done'), 260);
   }
 

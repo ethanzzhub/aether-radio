@@ -571,8 +571,12 @@
         .pointLat((d) => d.lat)
         .pointLng((d) => d.lng)
         .pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id))
-        .pointAltitude(0.006)
-        .pointRadius((d) => (state.current && d.id === state.current.id) ? 0.5 : 0.3)
+        // 圆点而非圆柱：高度收到贴地（0.001 只为避免与球面 z-fighting），
+        // 半径保持，视觉上就是一枚平铺在地表上的圆点
+        .pointAltitude(0.001)
+        .pointRadius((d) => (state.current && d.id === state.current.id) ? 0.46 : 0.26)
+        // 分段数太低时圆点在放大后会变成多边形，24 段足够圆
+        .pointResolution(24)
         .pointLabel((d) => globeTip(d))
         .onPointClick((d) => { selectStation(d); play(d); })
         .ringsData([])

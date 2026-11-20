@@ -580,9 +580,10 @@
     const filtered = getFiltered().length;
     const catalog = state.catalogTotal ? ' / 目录 <b>' + state.catalogTotal.toLocaleString() + '</b>' : '';
     let html;
-    if (state.favoritesOnly) html = '收藏 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
-    else if (state.query) html = '匹配 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
-    else if (state.genre || state.country) html = '筛选 <b>' + filtered + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
+    const filteredText = filtered.toLocaleString();
+    if (state.favoritesOnly) html = '收藏 <b>' + filteredText + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
+    else if (state.query) html = '匹配 <b>' + filteredText + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
+    else if (state.genre || state.country) html = '筛选 <b>' + filteredText + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
     else html = '已载入 <b>' + total.toLocaleString() + '</b> 座' + catalog + (state.hasMore ? ' · 可继续加载' : '');
     if (state.dataSource === 'local') {
       const g = state.localMeta && state.localMeta.generatedAt;
@@ -938,14 +939,16 @@
     $('stationGrid').innerHTML = shown.map(cardHTML).join('');
     $('listEmpty').hidden = shown.length !== 0;
     const localMore = state.visibleCount < sorted.length;
-    const moreAvailable = state.query ? state.searchHasMore : state.hasMore;
-    $('loadMore').hidden = localMore ? false : !moreAvailable;
+    // 只有真正能向目录取下一页时才给远程按钮；本地全量目录下不存在「下一批」
+    const remoteMore = state.dataSource === 'api' && (state.query ? state.searchHasMore : state.hasMore);
+    $('loadMore').hidden = !(localMore || remoteMore);
     $('loadMore').textContent = localMore ? '显示更多已载入电台' : '从全球目录加载更多电台';
     $('listTitle').textContent = state.favoritesOnly
       ? '我的收藏'
       : (state.query ? '搜索结果'
         : (state.country ? (state.countryName || '国家筛选')
           : (state.genre ? (GENRE_LABELS[state.genre] || state.genre) : '全球电台')));
+    updateResultMeta();
   }
   function cardHTML(s) {
     const isCurrent = state.current && state.current.id === s.id;
@@ -1189,11 +1192,14 @@
     $('searchClear').addEventListener('click', () => {
       input.value = '';
       state.query = '';
+      state.visibleCount = 30;
+      state.searchOffset = 0;
       $('searchClear').hidden = true;
       $('searchKbd').hidden = false;
       $('suggest').hidden = true;
       updateGlobeData();
       renderList();
+      updateResultMeta();
       input.focus();
     });
     $('suggest').addEventListener('click', (e) => {
@@ -1248,12 +1254,19 @@
 
     // 加载更多 / 排序
     $('loadMore').addEventListener('click', () => {
-      if (state.visibleCount < getSorted(getFiltered()).length) {
+      const total = getSorted(getFiltered()).length;
+      if (state.visibleCount < total) {
         state.visibleCount += 120;
         renderList();
-      } else {
-        loadMoreStations();
+        return;
       }
+      if (state.dataSource !== 'api') {
+        // 本地全量目录：没有「下一批」可取，给出明确反馈而不是静默无响应
+        toast('当前筛选下的电台已全部显示，共 ' + total.toLocaleString() + ' 座');
+        renderList();
+        return;
+      }
+      loadMoreStations();
     });
 
     // 无限滚动：接近底部时先展开已载入内容，再自动向目录取下一批。

@@ -59,6 +59,10 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 ::selection { background: var(--accent); color: var(--on-accent); }
+/* hidden 属性必须优先于各处的 display 声明。
+   否则 .more-btn { display: block } 之类会把 el.hidden = true 顶掉，
+   于是「没有更多可加载」时按钮仍然显示，点了也没有任何反应。 */
+[hidden] { display: none !important; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }

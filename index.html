@@ -73,6 +73,10 @@
           <button data-mode="3d" class="is-active" type="button" title="3D 地球">3D</button>
           <button data-mode="2d" type="button" title="2D 地图（兼容模式）">2D</button>
         </div>
+        <label class="estimate-toggle" id="estimateToggle" title="推算坐标来自地名匹配，位置为近似值">
+          <input type="checkbox" id="showEstimated" checked>
+          <span>估算位置</span>
+        </label>
         <div class="globe-guide" id="globeGuide">
           <span class="guide-dot"></span> 拖动旋转 · 滚轮缩放 · 点击光点收听
         </div>
@@ -90,7 +94,7 @@
           <div class="spotlight-stats">
             <div><strong id="statStations">—</strong><span>座电台</span></div>
             <div><strong id="statCountries">—</strong><span>个国家</span></div>
-            <div><strong id="statGeo">—</strong><span>可定位</span></div>
+            <div><strong id="statGeo">—</strong><span>精确坐标</span></div>
           </div>
         </div>
         <div class="spotlight-detail" id="spotlightDetail" hidden>

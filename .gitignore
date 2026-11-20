@@ -37,3 +37,7 @@ npm-debug.log*
 
 # 目录构建的原始拉取缓存（体积大，可随时重新拉取）
 data/catalog.raw.json
+
+# Python 编译缓存
+__pycache__/
+*.pyc

@@ -52,6 +52,7 @@
     pageSize: 1000,        // 每次「加载更多」从目录追加的数量
     codecSupport: {},
     mapMode: 'auto',       // auto | 3d | 2d
+    showEstimated: true,   // 是否在地图上显示推算坐标（非目录提供的坐标）
     nextOffset: 1000,
     searchOffset: 0,
     hasMore: true,
@@ -268,6 +269,7 @@
       lat: hasGeo ? lat : NaN,
       lng: hasGeo ? lng : NaN,
       hasGeo,
+      geoSource: s.geoSource || (hasGeo ? 'original' : ''),
       homepage: s.homepage || ''
     };
   }
@@ -639,8 +641,13 @@
   }
   // 列表：全量池（含无坐标电台）
   function getFiltered() { return applyFilters(state.stations); }
-  // 地球：仅带坐标的子集
-  function getGlobeStations() { return applyFilters(state.geoStations); }
+  // 地球：带坐标的子集；可隐藏推算坐标，只看目录提供的真实位置
+  function getGlobeStations() {
+    const list = state.showEstimated
+      ? state.geoStations
+      : state.geoStations.filter((s) => s.geoSource === 'original' || s.geoSource === 'city');
+    return applyFilters(list);
+  }
   function getSorted(list) {
     const copy = list.slice();
     switch (state.sort) {
@@ -693,7 +700,7 @@
       getStations: getGlobeStations,
       getCurrent: () => state.current,
       onSelect: (s) => { selectStation(s); play(s); },
-      heatColor: (votes, isCurrent) => heatColor(votes, isCurrent, 'flat')
+      heatColor: (votes, isCurrent, geoSource) => heatColor(votes, isCurrent, 'flat', geoSource)
     });
   }
 
@@ -717,7 +724,7 @@
         .atmosphereAltitude(0.15)
         .pointLat((d) => d.lat)
         .pointLng((d) => d.lng)
-        .pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id))
+        .pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id, null, d.geoSource))
         // 圆点而非圆柱：几何体已改为贴地的圆形面片（无厚度/高度），
         // altitude 直接取 0，圆点贴合在地球表面。
         .pointAltitude(0)
@@ -788,7 +795,7 @@
   }
   // 热度配色：低热度偏沉、高热度偏亮。
   // variant='flat' 用于浅色 2D 地图（深色系），默认用于深色地球贴图（亮色系）。
-  function heatColor(votes, isCurrent, variant) {
+  function heatColor(votes, isCurrent, variant, geoSource) {
     const flat = variant === 'flat';
     if (isCurrent) return flat ? '#b03a12' : '#ff8a5c';
     const t = heatNorm(votes);
@@ -798,19 +805,29 @@
     const seg = Math.min(stops.length - 2, Math.floor(t * (stops.length - 1)));
     const local = t * (stops.length - 1) - seg;
     const a = stops[seg], b = stops[seg + 1];
-    return 'rgb(' + a.map((v, i) => Math.round(v + (b[i] - v) * local)).join(',') + ')';
+    let rgb = a.map((v, i) => Math.round(v + (b[i] - v) * local));
+    // 推算坐标降饱和、向灰靠拢，与目录提供的真实坐标明显区分
+    if (geoSource === 'country') rgb = rgb.map((v) => Math.round(v * 0.55 + 118 * 0.45));
+    else if (geoSource === 'admin1' || geoSource === 'city') {
+      rgb = rgb.map((v) => Math.round(v * 0.8 + 118 * 0.2));
+    }
+    return 'rgb(' + rgb.join(',') + ')';
   }
   // 圆点半径（角度度）：对标 radio.garden，热度越高圆点越大、越亮；
   // 低热度小点不喧宾夺主，高热度台自然成为视觉焦点。当前播放台单独放大。
   function pointRadius(d) {
     if (state.current && d.id === state.current.id) return 0.5;
     const t = heatNorm(d.votes);
-    return 0.16 + t * 0.34;   // 0.16° ~ 0.50°
+    // 推算坐标缩小一号，避免示意点抢走真实电台的视觉焦点
+    const factor = d.geoSource === 'country' ? 0.62
+      : (d.geoSource === 'admin1' || d.geoSource === 'city') ? 0.78 : 1;
+    return (0.16 + t * 0.34) * factor;
   }
   function globeTip(d) {
+    const est = d.geoSource && d.geoSource !== 'original' ? ' · 位置估算' : '';
     return '<div class="globe-tip">' + logoHTML(d)
       + '<div><b>' + esc(d.name) + '</b><small>' + flagEmoji(d.cc) + ' '
-      + esc(countryLabel(d.cc, d.country)) + ' · ' + esc((d.tags[0] || 'RADIO').toUpperCase())
+      + esc(countryLabel(d.cc, d.country)) + ' · ' + esc((d.tags[0] || 'RADIO').toUpperCase()) + est
       + '</small></div></div>';
   }
   function updateGlobeData() {
@@ -818,7 +835,7 @@
     // 地球只渲染带坐标的子集（列表仍可查看全部电台）
     const points = getGlobeStations().filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
     globe.pointsData(points);
-    globe.pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id));
+    globe.pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id, null, d.geoSource));
     globe.pointAltitude(0);
     globe.pointRadius((d) => pointRadius(d));
     globe.ringsData(state.current && Number.isFinite(state.current.lat) ? [state.current] : []);
@@ -875,7 +892,10 @@
   function updateStats() {
     $('statStations').textContent = state.stations.length.toLocaleString();
     $('statCountries').textContent = new Set(state.stations.map((s) => s.cc).filter(Boolean)).size;
-    $('statGeo').textContent = state.geoStations.length.toLocaleString();
+    const real = state.geoStations.filter((s) => s.geoSource === 'original').length;
+    $('statGeo').textContent = real.toLocaleString();
+    $('statGeo').parentElement.title = '目录直接提供 ' + real.toLocaleString()
+      + ' 座 · 地名推算 ' + (state.geoStations.length - real).toLocaleString() + ' 座';
   }
   function renderList() {
     const all = getFiltered();
@@ -930,7 +950,11 @@
     $('spotlightDetail').hidden = false;
     $('detailLogo').innerHTML = logoHTML(s);
     $('detailName').textContent = s.name;
-    $('detailPlace').textContent = [flagEmoji(s.cc), countryLabel(s.cc, s.country), s.region].filter(Boolean).join(' · ');
+    const placeBase = [flagEmoji(s.cc), countryLabel(s.cc, s.country), s.region].filter(Boolean).join(' · ');
+    const geoNote = s.geoSource === 'city' ? ' · 城市位置估算'
+      : s.geoSource === 'admin1' ? ' · 州/省位置估算'
+      : s.geoSource === 'country' ? ' · 国家位置估算' : '';
+    $('detailPlace').textContent = placeBase + geoNote;
     $('detailTags').innerHTML = s.tags.slice(0, 5).map((t) => '<span>' + esc(GENRE_LABELS[t.toLowerCase()] || t) + '</span>').join('');
     const playing = state.current && state.current.id === s.id && state.playing;
     $('detailPlay').querySelector('span').textContent = playing ? '暂停播放' : '开始收听';
@@ -1261,6 +1285,11 @@
         return;
       }
       setMapMode(btn.dataset.mode);
+    });
+    $('showEstimated').addEventListener('change', (e) => {
+      state.showEstimated = e.target.checked;
+      updateGlobeData();
+      toast(state.showEstimated ? '已显示全部估算位置' : '已隐藏估算位置，仅看真实坐标');
     });
     $('globeGuide').addEventListener('click', () => { $('globeGuide').classList.add('is-hidden'); });
 

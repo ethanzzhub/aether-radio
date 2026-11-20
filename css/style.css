@@ -340,6 +340,19 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .map-mode-switch button:hover { color: var(--text); }
 .map-mode-switch button.is-active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
+.estimate-toggle {
+  position: absolute; top: 60px; right: 22px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  background: oklch(99.5% 0.003 85 / .88);
+  backdrop-filter: blur(8px);
+  color: var(--muted);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .04em;
+  cursor: pointer; user-select: none;
+}
+.estimate-toggle input { accent-color: var(--accent); width: 12px; height: 12px; margin: 0; cursor: pointer; }
+
 /* 2D 备用地图 */
 #flatMap { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; }
 #flatMap:active { cursor: grabbing; }

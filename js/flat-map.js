@@ -119,11 +119,13 @@
         const p = project(s.lng, s.lat);
         if (p.x < -10 || p.x > W + 10 || p.y < -10 || p.y > H + 10) continue;
         const isCur = current && s.id === current.id;
-        const r = isCur ? 5.5 : (hovered && hovered.id === s.id ? 5 : 2.6);
+        const estFactor = s.geoSource === 'country' ? 0.62
+          : (s.geoSource === 'admin1' || s.geoSource === 'city') ? 0.78 : 1;
+        const r = isCur ? 5.5 : (hovered && hovered.id === s.id ? 5 : 2.6 * estFactor);
         points.push({ x: p.x, y: p.y, r: r, station: s });
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = heatColor(s.votes, isCur);
+        ctx.fillStyle = heatColor(s.votes, isCur, s.geoSource);
         ctx.fill();
         if (isCur) {
           ctx.strokeStyle = 'rgba(176,58,18,0.9)';

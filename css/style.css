@@ -473,7 +473,23 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 /* ============================================================
    列表视图
    ============================================================ */
-.list-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 30px 0 20px; }
+/* 列表头部固定：滚动电台网格时「全球电台 + 国家/排序」一直可见。
+   背景用与 .app 同一套渐变（fixed 附着按视口解析，与页面背景对齐），
+   否则纯色会在地图纸纹理上留下一块明显的色差。 */
+.list-head {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
+  padding: 30px 0 20px;
+  background:
+    linear-gradient(to right, oklch(55% 0.02 232 / .0275) 1px, transparent 1px) fixed,
+    linear-gradient(to bottom, oklch(55% 0.02 232 / .0275) 1px, transparent 1px) fixed,
+    radial-gradient(120% 90% at 50% -30%, oklch(94% 0.020 80 / .8), transparent 65%) fixed,
+    var(--paper);
+  background-size: 46px 46px, 46px 46px, auto, auto;
+  border-bottom: 1px solid var(--line-soft);
+}
 .eyebrow { margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: .22em; color: var(--accent); }
 .list-head h2 { margin: 0; font-family: var(--font-display); font-weight: 500; font-size: clamp(28px, 3vw, 40px); line-height: 1; }
 
@@ -752,8 +768,12 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   .spotlight-stats { margin-top: 24px; padding-top: 16px; }
 
   .view-list { padding: 0 14px 20px; overflow-y: visible; }
-  .list-head { padding: 22px 0 16px; flex-wrap: wrap; gap: 14px; }
-  .list-head h2 { font-size: 28px; }
+  /* 移动端滚动容器是整个 .main，列表必须回到文档流里，
+     否则绝对定位的 .view 会让吸顶头部跟着内容一起滚走 */
+  .view-list.is-active { position: relative; inset: auto; }
+  .list-head { padding: 14px 0 12px; flex-wrap: wrap; gap: 12px; }
+  .eyebrow { margin-bottom: 5px; font-size: 9px; }
+  .list-head h2 { font-size: 24px; }
   .list-controls { width: 100%; gap: 10px; }
   .list-filter, .list-sort { flex: 1 1 0; gap: 0; }
   .list-filter label, .list-sort label { display: none; }

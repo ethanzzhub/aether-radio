@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""AETHER 本地服务：静态站点 + 共享状态存储。
+"""AETHER 本地服务：静态站点 + 共享状态存储 + 频道体检调度。
 
-只监听 127.0.0.1，供本机所有浏览器共用同一份收藏与设置：
+只监听回环地址（IPv4 127.0.0.1 与 IPv6 ::1 各起一份），供本机所有浏览器
+共用同一份收藏与设置：
     GET  /api/state   -> 读取 .data/state.json（不存在则返回 {}）
     PUT  /api/state   -> 整体写入（先写临时文件再原子替换）
 
-其余路径按普通静态文件从项目根目录读取。
+同时监听 IPv6 是因为新版浏览器把 localhost 优先解析为 ::1，只绑 IPv4 会让
+http://localhost:8765 直接被拒。
+
+其余路径按普通静态文件从项目根目录读取。后台线程每天凌晨定时运行
+scripts/check_streams.py，把不可播放/卡顿的电台从页面上隐藏。
 """
+import datetime
 import json
 import os
+import socket
+import subprocess
+import sys
 import threading
 import time
 from http import HTTPStatus
@@ -20,6 +29,77 @@ STATE_FILE = os.path.join(DATA_DIR, 'state.json')
 STATE_PATH = '/api/state'
 MAX_BODY = 2 * 1024 * 1024  # 状态文件不会很大，超过 2MB 视为异常
 LOCK = threading.Lock()
+
+CHECK_SCRIPT = os.path.join(ROOT, 'scripts', 'check_streams.py')
+CHECK_RESULT = os.path.join(ROOT, 'data', 'stream-bad.json')
+CHECK_LOG_DIR = os.path.join(ROOT, '.logs')
+CHECK_LOCK = threading.Lock()
+
+# AETHER_HEALTH_AUTORUN=0 可关闭自动体检
+# AETHER_HEALTH_HOUR / AETHER_HEALTH_MINUTE 指定每天体检的本地时间，默认 03:00
+HEALTH_AUTORUN = os.environ.get('AETHER_HEALTH_AUTORUN', '1') != '0'
+HEALTH_INITIAL_DELAY = float(os.environ.get('AETHER_HEALTH_INITIAL_DELAY', '90'))
+HEALTH_WORKERS = os.environ.get('AETHER_HEALTH_WORKERS', '120')
+
+
+def _env_int(name, default, lo, hi):
+    try:
+        return min(hi, max(lo, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
+HEALTH_HOUR = _env_int('AETHER_HEALTH_HOUR', 3, 0, 23)
+HEALTH_MINUTE = _env_int('AETHER_HEALTH_MINUTE', 0, 0, 59)
+
+
+def health_result_age():
+    """返回体检结果距今的秒数；文件不存在返回 None。"""
+    try:
+        return time.time() - os.path.getmtime(CHECK_RESULT)
+    except OSError:
+        return None
+
+
+def run_health_check():
+    """串行执行一次体检，日志追加到 .logs/stream-check.log。"""
+    if not CHECK_LOCK.acquire(blocking=False):
+        print('频道体检已在运行，跳过本次调度', flush=True)
+        return
+    try:
+        os.makedirs(CHECK_LOG_DIR, exist_ok=True)
+        log_path = os.path.join(CHECK_LOG_DIR, 'stream-check.log')
+        cmd = [sys.executable, CHECK_SCRIPT, '--workers', HEALTH_WORKERS]
+        print('频道体检开始：%s' % time.strftime('%Y-%m-%d %H:%M:%S'), flush=True)
+        with open(log_path, 'a', encoding='utf-8') as log:
+            log.write('\n===== %s =====\n' % time.strftime('%Y-%m-%d %H:%M:%S'))
+            log.flush()
+            subprocess.run(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=False)
+        print('频道体检结束：%s' % time.strftime('%Y-%m-%d %H:%M:%S'), flush=True)
+    except OSError as exc:
+        print('频道体检启动失败：%s' % exc, flush=True)
+    finally:
+        CHECK_LOCK.release()
+
+
+def seconds_until_daily(now=None):
+    """距离下一次本地体检时刻（默认每天 03:00）的秒数。"""
+    now = now or datetime.datetime.now()
+    target = now.replace(hour=HEALTH_HOUR, minute=HEALTH_MINUTE,
+                         second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def health_scheduler(stop):
+    """每天凌晨固定时刻体检一次；仅在从未体检过时于启动后补跑一次。"""
+    if health_result_age() is None:
+        if stop.wait(HEALTH_INITIAL_DELAY):
+            return
+        run_health_check()
+    while not stop.wait(seconds_until_daily()):
+        run_health_check()
 
 
 def read_state():
@@ -119,16 +199,52 @@ class Handler(SimpleHTTPRequestHandler):
             super().log_message(fmt, *args)
 
 
+class V6HTTPServer(ThreadingHTTPServer):
+    """IPv6 回环服务：与 IPv4 版共用同一端口的不同协议族。"""
+    address_family = socket.AF_INET6
+    daemon_threads = True
+
+
 def main():
     port = int(os.environ.get('AETHER_PORT', '8765'))
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    print('AETHER serving %s\nhttp://127.0.0.1:%d' % (ROOT, port), flush=True)
+    host = os.environ.get('AETHER_HOST', '127.0.0.1')
+
+    servers = []
+    v4 = ThreadingHTTPServer((host, port), Handler)
+    v4.daemon_threads = True
+    servers.append(v4)
+
+    v6 = None
     try:
-        server.serve_forever()
+        v6 = V6HTTPServer(('::1', port), Handler)
+        servers.append(v6)
+    except OSError as exc:
+        print('IPv6 回环未启用（%s），仅 IPv4 可用' % exc, flush=True)
+
+    print('AETHER serving %s' % ROOT, flush=True)
+    print('  http://127.0.0.1:%d  (IPv4)' % port, flush=True)
+    if v6 is not None:
+        print('  http://localhost:%d    (IPv6 ::1 已就绪)' % port, flush=True)
+
+    for extra in servers[1:]:
+        threading.Thread(target=extra.serve_forever, daemon=True,
+                         name='aether-v6').start()
+
+    stop_health = threading.Event()
+    if HEALTH_AUTORUN:
+        threading.Thread(target=health_scheduler, args=(stop_health,), daemon=True,
+                         name='aether-health').start()
+        print('频道体检调度已启动（每天 %02d:%02d，日志 .logs/stream-check.log）'
+              % (HEALTH_HOUR, HEALTH_MINUTE), flush=True)
+
+    try:
+        v4.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        stop_health.set()
+        for s in servers:
+            s.server_close()
 
 
 if __name__ == '__main__':

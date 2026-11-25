@@ -38,6 +38,14 @@ npm-debug.log*
 # 目录构建的原始拉取缓存（体积大，可随时重新拉取）
 data/catalog.raw.json
 
+# 名称回修前的目录备份（可随时用 --undo 重建）
+data/catalog.before-name-refine.json
+
+# 频道体检结果（运行时生成；静态托管需要过滤时可强制提交）
+data/stream-health.json
+data/stream-bad.json
+data/.stream-check.lock
+
 # Python 编译缓存
 __pycache__/
 *.pyc

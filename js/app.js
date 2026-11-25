@@ -53,6 +53,11 @@
     codecSupport: {},
     mapMode: 'auto',       // auto | 3d | 2d
     showEstimated: true,   // 是否在地图上显示推算坐标（非目录提供的坐标）
+    hideUnhealthy: true,   // 隐藏体检不通畅（不可播放/卡顿）的电台
+    badIds: null,          // 体检失效的电台 id；null 表示没有可用体检数据
+    healthMeta: null,      // 体检文件的生成信息
+    healthStamp: '',       // 体检文件版本，用于静默感知后台体检更新
+    healthSkipped: 0,      // 本轮因体检被隐藏的电台数
     nextOffset: 1000,
     searchOffset: 0,
     hasMore: true,
@@ -62,6 +67,8 @@
 
   let globe = null;
   let globeReady = false;
+  // 3D 点位的单位向量索引：用于「离光标最近的电台」拾取（点只有 1–2px，直点很难命中）
+  let globeIndex = null;
   let flatMap = null;
   let satMap = null;       // MapLibre 卫星地球（独立模式，不影响 3D/2D）
   let rotateTimer = null;
@@ -208,9 +215,13 @@
   }
   function letterURI(name) {
     const ch = esc((String(name || '◉').trim()[0] || '◉'));
+    // 台标底色跟随主题：浅色用薄荷底深绿字，暗色用墨绿底亮绿字
+    const dark = document.documentElement.dataset.theme === 'dark';
+    const bg = dark ? '#16201e' : '#e7f4ec';
+    const fg = dark ? '#47d98a' : '#0a7d4a';
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">'
-      + '<rect width="96" height="96" fill="#e8e2d6"/>'
-      + '<text x="48" y="63" text-anchor="middle" font-family="Georgia,serif" font-size="46" fill="#94621c">'
+      + '<rect width="96" height="96" fill="' + bg + '"/>'
+      + '<text x="48" y="64" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="44" font-weight="600" fill="' + fg + '">'
       + ch + '</text></svg>';
     return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
   }
@@ -271,6 +282,7 @@
       lng: hasGeo ? lng : NaN,
       hasGeo,
       geoSource: s.geoSource || (hasGeo ? 'original' : ''),
+      nameHint: s.nameHint || '',
       homepage: s.homepage || ''
     };
   }
@@ -303,13 +315,74 @@
   }
   function usable(s) {
     if (!s.url || !/^https?:\/\//i.test(s.url)) return false;
+    // 体检过滤放最前，避免 UNKNOWN 编码等提前 return 的分支绕过
+    if (state.hideUnhealthy && state.badIds && state.badIds.has(s.id)) return false;
     // HTTPS 页面不能播放 HTTP 音频流（浏览器混合内容拦截）
     if (window.location.protocol === 'https:' && !/^https:/i.test(s.url)) return false;
     // 过滤浏览器不支持的音频编码
     const codec = codecOf(s);
     if (state.codecSupport[codec] === false) return false;
-    if (codec === 'UNKNOWN') return true;
     return true;
+  }
+
+  /* ---------------- 频道体检数据 ----------------
+     scripts/check_streams.py 定时探测全部电台，把不通畅的 id 写入
+     data/stream-bad.json。该文件缺失、损坏或过旧时一律不过滤，避免误伤。 */
+  const HEALTH_MAX_AGE = 14 * 24 * 3600 * 1000;
+
+  async function loadStreamHealth() {
+    // ?all=1 可临时绕过体检过滤，用于排查或找回被隐藏的收藏
+    if (new URLSearchParams(window.location.search).has('all')) {
+      state.hideUnhealthy = false;
+      state.badIds = null;
+      return;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    try {
+      const res = await fetch('data/stream-bad.json?t=' + Date.now(), {
+        cache: 'no-store', signal: ctrl.signal
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.bad)) {
+          const stamp = Date.parse(data.meta && data.meta.generatedAt);
+          if (Number.isFinite(stamp) && Date.now() - stamp <= HEALTH_MAX_AGE) {
+            state.badIds = new Set(data.bad);
+            state.healthMeta = data.meta || {};
+            state.healthStamp = String(stamp) + ':' + data.bad.length;
+          }
+        }
+      }
+    } catch (_) { /* 体检数据不可用时保持原有列表 */ }
+    finally { clearTimeout(timer); }
+    state.hideUnhealthy = readJSON('aether:hideUnhealthy', true) !== false;
+  }
+
+  function toggleHealthFilter() {
+    if (!state.healthMeta) return;
+    state.hideUnhealthy = !state.hideUnhealthy;
+    saveJSON('aether:hideUnhealthy', state.hideUnhealthy);
+    loadStations(true);
+  }
+
+  // 后台体检结果更新后，页面静默重建列表，不弹提示、不打断正在播放的电台
+  function startHealthWatcher() {
+    if (new URLSearchParams(window.location.search).has('all')) return;
+    setInterval(async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('data/stream-bad.json?t=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const stamp = Date.parse(data && data.meta && data.meta.generatedAt);
+        if (!data || !Array.isArray(data.bad) || !Number.isFinite(stamp)) return;
+        const next = String(stamp) + ':' + data.bad.length;
+        if (next === state.healthStamp) return;
+        state.healthStamp = next;
+        loadStations(true);
+      } catch (_) { /* 忽略轮询失败 */ }
+    }, 5 * 60 * 1000);
   }
 
   /* ---------------- 数据获取 ---------------- */
@@ -371,7 +444,10 @@
       if (!payload || !Array.isArray(payload.stations) || !payload.stations.length) {
         throw new Error('本地目录为空');
       }
-      const list = payload.stations.map(normalize).filter(usable);
+      const normalized = payload.stations.map(normalize);
+      state.healthSkipped = state.badIds
+        ? normalized.reduce((n, s) => n + (state.badIds.has(s.id) ? 1 : 0), 0) : 0;
+      const list = normalized.filter(usable);
       if (!list.length) throw new Error('本地目录无可用电台');
       ingest(list, true);
       state.dataSource = 'local';
@@ -399,8 +475,11 @@
     } catch (_) { /* 统计接口失败不影响主流程 */ }
   }
 
-  async function loadStations() {
+  async function loadStations(quiet) {
     const started = performance.now();
+    state.healthSkipped = 0;
+    // 先读体检结果，再决定目录里哪些电台不进入页面
+    await loadStreamHealth();
     // 第一优先：同源本地目录（完整、离线可用、不受 CSP 与网络影响）
     const localOK = await loadLocalCatalog(false);
     if (!localOK) {
@@ -441,11 +520,11 @@
     renderList();
     updateResultMeta();
     if (state.dataSource === 'local') {
-      toast('已载入本地目录 ' + state.stations.length.toLocaleString() + ' 座电台');
+      // 本地目录是常态，数量已经在筛选栏显示，不再弹 toast 打断阅读
       return;
     }
     if (state.dataSource !== 'api') {
-      toast(lastLoadBlocked
+      if (!quiet) toast(lastLoadBlocked
         ? '所在环境限制了外部数据请求，已启用内置 ' + state.stations.length + ' 座电台'
         : '暂时连不上电台目录，已启用内置 ' + state.stations.length + ' 座电台', true);
       return;
@@ -578,21 +657,32 @@
   function updateResultMeta() {
     const total = state.stations.length;
     const filtered = getFiltered().length;
-    const catalog = state.catalogTotal ? ' / 目录 <b>' + state.catalogTotal.toLocaleString() + '</b>' : '';
+    const catalog = state.catalogTotal ? ' <span class="meta-catalog">/ 目录 <b>' + state.catalogTotal.toLocaleString() + '</b></span>' : '';
     let html;
     const filteredText = filtered.toLocaleString();
     if (state.favoritesOnly) html = '收藏 <b>' + filteredText + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
     else if (state.query) html = '匹配 <b>' + filteredText + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
     else if (state.genre || state.country) html = '筛选 <b>' + filteredText + '</b> / 已载入 <b>' + total.toLocaleString() + '</b> 座';
     else html = '已载入 <b>' + total.toLocaleString() + '</b> 座' + catalog + (state.hasMore ? ' · 可继续加载' : '');
+    const sep = ' · ';
     if (state.dataSource === 'local') {
       const g = state.localMeta && state.localMeta.generatedAt;
       const built = g ? String(g).slice(0, 10) : '';
-      html += ' · 本地目录' + (built ? ' <span class="meta-date">' + built + ' 生成</span>' : '');
+      html += ' <span class="meta-built">· 本地目录' + (built ? ' <span class="meta-date">' + built + ' 生成</span>' : '') + '</span>';
     } else if (state.dataSource !== 'api') {
       html += ' · 内置目录 <button class="retry-link" type="button">重试连接</button>';
     }
-    $('resultMeta').innerHTML = html;
+    let toggle = '';
+    if (state.healthMeta) {
+      const hidden = state.hideUnhealthy && state.healthSkipped
+        ? sep + '<span class="meta-hidden">已隐藏 <b>' + state.healthSkipped.toLocaleString() + '</b> 座失效电台</span>' : '';
+      html += hidden;
+      // 按钮独立于文本，窄屏时只留按钮、收起长串统计
+      toggle = '<button class="health-toggle" type="button" aria-pressed="'
+        + (state.hideUnhealthy ? 'true' : 'false') + '">'
+        + (state.hideUnhealthy ? '显示全部' : '仅显示可用') + '</button>';
+    }
+    $('resultMeta').innerHTML = '<span class="meta-text">' + html + '</span> ' + toggle;
   }
 
   async function liveSearch(query) {
@@ -647,7 +737,8 @@
   function getGlobeStations() {
     const list = state.showEstimated
       ? state.geoStations
-      : state.geoStations.filter((s) => s.geoSource === 'original' || s.geoSource === 'city');
+      : state.geoStations.filter((s) => s.geoSource === 'original'
+        || s.geoSource === 'city' || s.geoSource === 'nameCity');
     return applyFilters(list);
   }
   function getSorted(list) {
@@ -668,11 +759,24 @@
         (c.getContext('webgl') || c.getContext('experimental-webgl')));
     } catch (_) { return false; }
   }
+  // globe.gl 把 canvas 和 HTML 元素层都放在这个包装节点里；
+  // 2D 视图下只隐藏 canvas 是不够的，HTML 层的呼吸圈会浮在 2D 地图上面
+  function globeWrapEl() {
+    const scene = $('globeContainer').querySelector('.scene-container');
+    return scene ? scene.parentElement : null;
+  }
+
   function setMapMode(mode) {
     state.mapMode = mode;
     document.querySelectorAll('#mapModeSwitch button').forEach((b) =>
       b.classList.toggle('is-active', b.dataset.mode === mode));
     const isSat = mode === 'satellite';
+    // 3D 才有地球的外发光/暗角，2D 与卫星影像需要干净的原图
+    const stage = $('globeStage');
+    if (stage) {
+      stage.classList.toggle('mode-3d', mode === '3d');
+      stage.classList.toggle('mode-map', mode !== '3d');
+    }
     $('globeContainer').style.display = isSat ? 'none' : '';
     $('satelliteContainer').style.display = isSat ? '' : 'none';
     if (isSat) {
@@ -689,11 +793,15 @@
         globe.renderer().domElement.style.display = 'none';
         if (globe.controls()) globe.controls().autoRotate = false;
       }
+      const wrap = globeWrapEl();
+      if (wrap) wrap.style.display = 'none';
       if (flatMap) { flatMap.show(); flatMap.refresh(); }
-      $('globeGuide').lastChild.textContent = ' 拖动平移 · 滚轮缩放 · 点击光点收听';
+      $('globeGuide').lastChild.textContent = ' 拖动平移 · 滚轮或双指缩放至城市 · 点击光点收听';
     } else {
       if (satMap) satMap.hide();
       if (flatMap) flatMap.hide();
+      const wrap = globeWrapEl();
+      if (wrap) wrap.style.display = '';
       if (globeReady && globe) {
         globe.renderer().domElement.style.display = '';
         globe.controls().autoRotate = true;
@@ -728,10 +836,13 @@
     flatMap = window.FlatMap({
       container: el,
       getStations: getGlobeStations,
+      // 概览视野按全量带坐标电台计算，不受搜索/筛选影响
+      getAllStations: () => state.geoStations,
       getCurrent: () => state.current,
       onSelect: (s) => { selectStation(s); play(s); },
-      heatColor: (votes, isCurrent, geoSource) => heatColor(votes, isCurrent, 'flat', geoSource)
+      onStatus: (status, msg) => { if (status === 'tile-error') toast(msg, true); }
     });
+    window.__flatMap = flatMap.map; // 调试引用：供自动化验证使用
   }
 
   function initGlobe() {
@@ -747,11 +858,12 @@
       globe = window.Globe({ animateIn: true, enablePointerInteraction: true })
         (el)
         .backgroundColor('rgba(0,0,0,0)')
-        .globeImageUrl('assets/earth-blue-marble.jpg')
+        // 中性石墨地球：海洋近黑、大陆浅石墨灰，绿色只留给电台光点
+        .globeImageUrl('assets/earth-night.jpg')
         .bumpImageUrl('assets/earth-topology.png')
         .showAtmosphere(true)
-        .atmosphereColor('#c79a52')
-        .atmosphereAltitude(0.15)
+        .atmosphereColor('#1e6344')
+        .atmosphereAltitude(0.1)
         .pointLat((d) => d.lat)
         .pointLng((d) => d.lng)
         .pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id, null, d.geoSource))
@@ -762,18 +874,41 @@
         // 分段数太低时圆点在放大后会变成多边形，24 段足够圆
         .pointResolution(24)
         .pointLabel((d) => globeTip(d))
-        .onPointClick((d) => { selectStation(d); play(d); })
-        .ringsData([])
-        .ringLat((d) => d.lat)
-        .ringLng((d) => d.lng)
-        .ringColor(() => (t) => 'rgba(255,126,70,' + (1 - t) * 0.85 + ')')
-        .ringMaxRadius(3.2)
-        .ringPropagationSpeed(1.6)
-        .ringRepeatPeriod(1200);
+        // 选中台的呼吸指示只用一个 CSS 元素（见 .beacon），
+        // three-globe 的 rings 是逐帧重算的 WebGL 图元，这里不再启用。
+        .htmlLat((d) => d.lat)
+        .htmlLng((d) => d.lng)
+        .htmlAltitude(0.02)
+        .htmlElementVisibilityModifier((d, isVisible) => { d.style.display = isVisible ? '' : 'none'; })
+        .htmlElement(() => {
+          const el = document.createElement('div');
+          el.className = 'beacon' + (state.playing ? ' is-playing' : '');
+          el.innerHTML = '<i class="beacon-ping"></i><i class="beacon-ping"></i><i class="beacon-ping"></i><i class="beacon-core"></i>';
+          return el;
+        });
 
       globe.width(el.clientWidth || 800);
       globe.height(el.clientHeight || 600);
-      globe.pointOfView({ lat: 20, lng: 12, altitude: window.innerWidth < 760 ? 2.7 : 2.1 }, 0);
+      globe.pointOfView({ lat: 20, lng: 12, altitude: window.innerWidth < 760 ? 2.4 : 1.72 }, 0);
+
+      // 压暗球体材质：three-globe 的环境光 + 平行光会把贴图整体提亮，
+      // 只调贴图不足以沉下去，这里直接压材质颜色并削弱高光，
+      // 让地球退成背景、绿色光点成为画面唯一的亮部。
+      try {
+        const mat = globe.globeMaterial();
+        if (mat && mat.color) {
+          mat.color.setRGB(0.95, 1.0, 0.98);
+          mat.shininess = 2;
+          if (mat.specular && mat.specular.setRGB) mat.specular.setRGB(0.04, 0.06, 0.05);
+        }
+        // 抬高环境光：夜半球不再是纯黑窟窿，暗面也留得住大陆轮廓
+        // 环境光别开太猛：之前 π*0.78 把整颗球均匀打亮，对比度被压平，
+        // 看起来就像蒙了一层灰。收一档，保留晨昏线，大陆轮廓依然可见。
+        globe.scene().traverse((o) => {
+          if (o.isAmbientLight) o.intensity = Math.PI * 0.46;
+          else if (o.isDirectionalLight) o.intensity = Math.PI * 0.42;
+        });
+      } catch (_) { /* 材质/光照接口变动时保持默认观感 */ }
 
       const controls = globe.controls();
       controls.autoRotate = true;
@@ -785,19 +920,27 @@
       controls.minDistance = 103;
       controls.maxDistance = 500;
       controls.zoomSpeed = 0.6;
+      // 滚轮只缩放、不平移：globe.gl 默认 zoomToCursor=true，以光标位置为锚点，
+      // 缩放时地球中心会跟着光标方向漂移，看起来像"缩小画面时画面还在移动"。
+      // 关掉后以视图中心缩放，画面只拉近拉远，中心不动。
+      controls.zoomToCursor = false;
 
+      // 自动旋转与鼠标拾取必须互斥：地球一直转，鼠标停着不动时光标状态不刷新，
+      // 等用户按下按钮点位已转走，出现「光标是手型却点不中」的错位。
+      // 改为鼠标进入地图即停转，离开后才恢复——想点的时候地球是静止的。
       const pauseRotate = () => {
         controls.autoRotate = false;
         clearTimeout(rotateTimer);
-        rotateTimer = setTimeout(() => { controls.autoRotate = true; }, 7000);
       };
+      const resumeRotate = () => {
+        clearTimeout(rotateTimer);
+        rotateTimer = setTimeout(() => { controls.autoRotate = true; }, 600);
+      };
+      el.addEventListener('pointerenter', pauseRotate);
       el.addEventListener('pointerdown', pauseRotate);
       el.addEventListener('wheel', pauseRotate, { passive: true });
       el.addEventListener('pointerleave', () => {
-        if (window.matchMedia('(pointer: fine)').matches) {
-          clearTimeout(rotateTimer);
-          controls.autoRotate = true;
-        }
+        if (window.matchMedia('(pointer: fine)').matches) resumeRotate();
       });
 
       if (window.ResizeObserver) {
@@ -810,6 +953,9 @@
         ro.observe(el);
       }
       globeReady = true;
+      wireGlobePicking(el);
+      window.__aetherGlobe = globe; // 调试引用：供自动化验证与视觉迭代使用
+      window.__pickGlobeStation = pickGlobeStation;
       updateGlobeData();
     } catch (err) {
       globeReady = false;
@@ -823,35 +969,38 @@
   function heatNorm(votes) {
     return Math.min(1, Math.log10(1 + (votes || 0)) / Math.log10(1 + 300000));
   }
-  // 热度配色：低热度偏沉、高热度偏亮。
-  // variant='flat' 用于浅色 2D 地图（深色系），默认用于深色地球贴图（亮色系）。
+  // 热度配色：对标 Radio Garden 的城市灯火——统一在翠绿色域内做明暗，
+  // 低热度偏暗、高热度接近荧光的青绿，避免暖色把画面拉黄。
+  // variant='flat' 用于 2D 瓦片地图，默认用于 3D 暗色地球。
   function heatColor(votes, isCurrent, variant, geoSource) {
     const flat = variant === 'flat';
-    if (isCurrent) return flat ? '#b03a12' : '#ff8a5c';
+    if (isCurrent) return flat ? '#12e07a' : '#7dffb4';
     const t = heatNorm(votes);
     const stops = flat
-      ? [[178, 136, 76], [156, 98, 42], [132, 62, 28], [104, 38, 20]]
-      : [[198, 158, 94], [234, 190, 110], [252, 216, 136], [255, 244, 208]];
+      ? [[26, 212, 118], [44, 224, 132], [68, 236, 150], [108, 246, 178]]
+      : [[18, 214, 116], [36, 226, 130], [62, 238, 148], [104, 248, 176]];
     const seg = Math.min(stops.length - 2, Math.floor(t * (stops.length - 1)));
     const local = t * (stops.length - 1) - seg;
     const a = stops[seg], b = stops[seg + 1];
     let rgb = a.map((v, i) => Math.round(v + (b[i] - v) * local));
-    // 推算坐标降饱和、向灰靠拢，与目录提供的真实坐标明显区分
-    if (geoSource === 'country') rgb = rgb.map((v) => Math.round(v * 0.55 + 118 * 0.45));
-    else if (geoSource === 'admin1' || geoSource === 'city') {
-      rgb = rgb.map((v) => Math.round(v * 0.8 + 118 * 0.2));
+    // 推算坐标只做极轻的亮度衰减，绝不能往灰里混：
+    // 混灰会把翠绿拉成「灰绿」，正是之前看起来脏的原因
+    if (geoSource && geoSource !== 'original') {
+      const dim = geoSource === 'country' ? 0.93 : 0.97;
+      rgb = rgb.map((v) => Math.round(v * dim));
     }
     return 'rgb(' + rgb.join(',') + ')';
   }
   // 圆点半径（角度度）：对标 radio.garden，热度越高圆点越大、越亮；
   // 低热度小点不喧宾夺主，高热度台自然成为视觉焦点。当前播放台单独放大。
   function pointRadius(d) {
-    if (state.current && d.id === state.current.id) return 0.5;
+    // 当前台略大，但主要靠呼吸圈提示存在感，点本身不放大太多
+    if (state.current && d.id === state.current.id) return 0.1;
     const t = heatNorm(d.votes);
     // 推算坐标缩小一号，避免示意点抢走真实电台的视觉焦点
-    const factor = d.geoSource === 'country' ? 0.62
-      : (d.geoSource === 'admin1' || d.geoSource === 'city') ? 0.78 : 1;
-    return (0.16 + t * 0.34) * factor;
+    const factor = d.geoSource === 'country' ? 0.6
+      : (d.geoSource === 'admin1' || d.geoSource === 'city' || d.geoSource === 'nameCity') ? 0.78 : 1;
+    return (0.032 + t * 0.068) * factor;
   }
   function globeTip(d) {
     const est = d.geoSource && d.geoSource !== 'original' ? ' · 位置估算' : '';
@@ -860,20 +1009,161 @@
       + esc(countryLabel(d.cc, d.country)) + ' · ' + esc((d.tags[0] || 'RADIO').toUpperCase()) + est
       + '</small></div></div>';
   }
+  // three-globe 的电台点是逐个 Mesh + MeshLambertMaterial 画的，会被方向光照出明暗：
+  // 同一份翠绿，在朝光面亮、背光面直接压成灰绿。这里把每个点的「自发光」设成它
+  // 自己的颜色、漫反射压成 0，让点脱离光照，颜色只由 heatColor 决定。
+  function makePointsUnlit() {
+    if (!globeReady || !globe) return;
+    try {
+      globe.scene().traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const m = o.material;
+        if (o.__globeObjType === 'point' && m.emissive && m.color) {
+          // 逐点材质：自发光接管颜色，彻底不受光照影响。
+          // 颜色被压成纯黑说明已经处理过；否则（含 three-globe 重新赋色后）重新同步
+          if (m.color.getHex() === 0) return;
+          m.emissive.copy(m.color);
+          m.color.setRGB(0, 0, 0);
+          m.needsUpdate = true;
+        } else if (m.__aetherUnlit) {
+          return;
+        } else if (o.__globeObjType === 'points' && m.vertexColors) {
+          // 合并几何体（pointsMerge）时没有逐点材质，改用顶点色自发光
+          m.__aetherUnlit = true;
+          if (m.color && m.color.setRGB) m.color.setRGB(0, 0, 0);
+          if (m.emissive && m.emissive.setRGB) m.emissive.setRGB(0, 0, 0);
+          m.onBeforeCompile = (shader) => {
+            shader.fragmentShader = shader.fragmentShader.replace(
+              '#include <emissivemap_fragment>',
+              '#include <emissivemap_fragment>\n\t#ifdef USE_COLOR\n\ttotalEmissiveRadiance += vColor.rgb;\n\t#endif'
+            );
+          };
+          m.needsUpdate = true;
+        }
+      });
+    } catch (_) { /* 接口变动时退回受光渲染，不影响可用性 */ }
+  }
+
+  function buildGeoIndex(points) {
+    const n = points.length;
+    const vec = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const la = points[i].lat * Math.PI / 180;
+      const lo = points[i].lng * Math.PI / 180;
+      const c = Math.cos(la);
+      vec[i * 3] = c * Math.cos(lo);
+      vec[i * 3 + 1] = c * Math.sin(lo);
+      vec[i * 3 + 2] = Math.sin(la);
+    }
+    globeIndex = { list: points, vec: vec };
+  }
+
+  // 屏幕坐标 → 地球表面经纬度（自己解射线与球的交点，避免 three-globe 对 3 万个点做 raycast）
+  function screenToLatLng(x, y, w, h) {
+    try {
+      const camera = globe.camera();
+      const R = typeof globe.getGlobeRadius === 'function' ? globe.getGlobeRadius() : 100;
+      const o = camera.position;
+      const p = o.clone().set((x / w) * 2 - 1, -(y / h) * 2 + 1, 0.5).unproject(camera);
+      const d = p.sub(o).normalize();
+      const od = o.dot(d);
+      const disc = od * od - (o.lengthSq() - R * R);
+      if (!(disc > 0)) return null;
+      // 二次方程 t² + 2·od·t + (|o|²−R²) = 0，取近根（离相机最近的那个交点）
+      const t = -od - Math.sqrt(disc);
+      if (!(t > 0)) return null;
+      return globe.toGeoCoords(o.clone().addScaledVector(d, t));
+    } catch (_) { return null; }
+  }
+
+  // 光标附近（12px 内）最近的电台。命中半径按当前缩放换算成角度，
+  // 所以放大后依然贴合屏幕手感，缩到全球时也不会误抓隔壁城市。
+  function pickGlobeStation(clientX, clientY) {
+    if (!globeReady || !globe || !globeIndex) return null;
+    const canvas = globe.renderer().domElement;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+    const ll = screenToLatLng(x, y, rect.width, rect.height);
+    if (!ll) return null;
+    const la = ll.lat * Math.PI / 180;
+    const lo = ll.lng * Math.PI / 180;
+    const c = Math.cos(la);
+    const px = c * Math.cos(lo);
+    const py = c * Math.sin(lo);
+    const pz = Math.sin(la);
+    let alt = 1.7;
+    try { alt = globe.pointOfView().altitude; } catch (_) { /* 保持默认 */ }
+    const visibleDeg = 2 * Math.asin(Math.min(1, 1 / (1 + Math.max(0.02, alt)))) * 180 / Math.PI;
+    const cosTol = Math.cos(12 * (visibleDeg / rect.height) * Math.PI / 180);
+    const vec = globeIndex.vec;
+    const list = globeIndex.list;
+    let best = null;
+    let bestDot = cosTol;
+    for (let i = 0; i < list.length; i++) {
+      const d = vec[i * 3] * px + vec[i * 3 + 1] * py + vec[i * 3 + 2] * pz;
+      if (d > bestDot) { bestDot = d; best = list[i]; }
+    }
+    return best;
+  }
+
+  function wireGlobePicking(el) {
+    const canvas = globe.renderer().domElement;
+    let down = null;
+    let hoverRaf = 0;
+    let last = null;
+    el.addEventListener('pointerdown', (e) => {
+      down = { x: e.clientX, y: e.clientY, t: Date.now() };
+    });
+    el.addEventListener('pointermove', (e) => {
+      last = { x: e.clientX, y: e.clientY };
+      if (hoverRaf) return;
+      hoverRaf = requestAnimationFrame(() => {
+        hoverRaf = 0;
+        // 拖动旋转时不做拾取，避免光标乱闪
+        if (down && (Math.abs(last.x - down.x) > 4 || Math.abs(last.y - down.y) > 4)) return;
+        canvas.style.cursor = pickGlobeStation(last.x, last.y) ? 'pointer' : '';
+      });
+    });
+    el.addEventListener('pointerup', (e) => {
+      const start = down;
+      down = null;
+      if (!start) return;
+      if (Date.now() - start.t > 600) return;
+      if (Math.abs(e.clientX - start.x) > 6 || Math.abs(e.clientY - start.y) > 6) return;
+      const hit = pickGlobeStation(e.clientX, e.clientY);
+      if (hit) { selectStation(hit); play(hit); }
+    });
+    el.addEventListener('pointerleave', () => {
+      down = null;
+      canvas.style.cursor = '';
+    });
+  }
+
   function updateGlobeData() {
+    if (flatMap && state.mapMode === '2d') flatMap.refresh();
+    if (satMap && state.mapMode === 'satellite') satMap.refresh();
     if (!globeReady || !globe) return;
     // 地球只渲染带坐标的子集（列表仍可查看全部电台）
     const points = getGlobeStations().filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
     globe.pointsData(points);
+    buildGeoIndex(points);
     globe.pointColor((d) => heatColor(d.votes, state.current && d.id === state.current.id, null, d.geoSource));
     globe.pointAltitude(0);
     globe.pointRadius((d) => pointRadius(d));
-    globe.ringsData(state.current && Number.isFinite(state.current.lat) ? [state.current] : []);
-    if (flatMap && state.mapMode === '2d') flatMap.refresh();
-    if (satMap && state.mapMode === 'satellite') satMap.refresh();
+    globe.htmlElementsData(state.current && Number.isFinite(state.current.lat) ? [state.current] : []);
+    // 每次改数据 three-globe 都会重建点材质，补一次「不受光」补丁
+    makePointsUnlit();
+    requestAnimationFrame(makePointsUnlit);
+    setTimeout(makePointsUnlit, 240);
   }
   function focusGlobe(s) {
-    if (state.mapMode === '2d') return;
+    if (state.mapMode === '2d') {
+      if (flatMap) flatMap.focus(s);
+      return;
+    }
     if (state.mapMode === 'satellite') {
       if (satMap) satMap.focus(s);
       return;
@@ -990,7 +1280,8 @@
     const placeBase = [flagEmoji(s.cc), countryLabel(s.cc, s.country), s.region].filter(Boolean).join(' · ');
     const geoNote = s.geoSource === 'city' ? ' · 城市位置估算'
       : s.geoSource === 'admin1' ? ' · 州/省位置估算'
-      : s.geoSource === 'country' ? ' · 国家位置估算' : '';
+      : s.geoSource === 'country' ? ' · 国家位置估算'
+      : s.geoSource === 'nameCity' ? ' · 名称位置估算' : '';
     $('detailPlace').textContent = placeBase + geoNote;
     $('detailTags').innerHTML = s.tags.slice(0, 5).map((t) => '<span>' + esc(GENRE_LABELS[t.toLowerCase()] || t) + '</span>').join('');
     const playing = state.current && state.current.id === s.id && state.playing;
@@ -999,9 +1290,10 @@
     const meta = [
       ['语言', s.lang || '—'],
       ['音质', s.bitrate ? s.bitrate + ' kbps · ' + (s.codec || '—') : (s.codec || '—')],
-      ['坐标', Number.isFinite(s.lat) ? s.lat.toFixed(2) + '°, ' + s.lng.toFixed(2) + '°' : '目录未提供 · 仅列表可见'],
-      ['热度', s.votes.toLocaleString() + ' 票']
+      ['坐标', Number.isFinite(s.lat) ? s.lat.toFixed(2) + '°, ' + s.lng.toFixed(2) + '°' : '目录未提供 · 仅列表可见']
     ];
+    if (s.geoSource === 'nameCity' && s.nameHint) meta.push(['位置依据', '名称匹配 · ' + s.nameHint]);
+    meta.push(['热度', s.votes.toLocaleString() + ' 票']);
     $('detailMeta').innerHTML = meta.map((row) => '<div><dt>' + esc(row[0]) + '</dt><dd>' + esc(row[1]) + '</dd></div>').join('');
     if (s.homepage && /^https?:\/\//i.test(s.homepage)) {
       $('detailHome').href = s.homepage;
@@ -1069,6 +1361,7 @@
     updateFavoriteUI();
   }
   function updatePlayState() {
+    document.querySelectorAll('.beacon').forEach((b) => b.classList.toggle('is-playing', !!state.playing));
     const btn = $('playBtn');
     btn.classList.toggle('is-playing', state.playing);
     btn.classList.toggle('is-loading', state.loading && !state.playing);
@@ -1132,6 +1425,18 @@
     if (state.favoritesOnly) { updateGlobeData(); renderList(); }
   }
   function wireEvents() {
+    // 主题切换：只有一个 data-theme 开关，配色全部走 CSS 变量
+    const themeBtn = $('themeBtn');
+    if (themeBtn) {
+      themeBtn.addEventListener('click', () => {
+        const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        const meta = $('themeColorMeta');
+        if (meta) meta.setAttribute('content', next === 'dark' ? '#0b100e' : '#f4f6f5');
+        saveJSON('aether:theme', next);
+      });
+    }
+
     // 视图切换
     document.querySelectorAll('.view-switch button').forEach((b) =>
       b.addEventListener('click', () => setView(b.dataset.view)));
@@ -1152,6 +1457,7 @@
     // 内置目录下重试联网
     $('resultMeta').addEventListener('click', (e) => {
       if (e.target.closest('.retry-link')) retryConnection();
+      if (e.target.closest('.health-toggle')) toggleHealthFilter();
     });
 
     // 收藏筛选
@@ -1326,7 +1632,7 @@
         return;
       }
       if (!globeReady || !globe) return;
-      globe.pointOfView({ lat: 20, lng: 12, altitude: window.innerWidth < 760 ? 2.7 : 2.1 }, 900);
+      globe.pointOfView({ lat: 20, lng: 12, altitude: window.innerWidth < 760 ? 2.4 : 1.72 }, 900);
     });
     $('mapModeSwitch').addEventListener('click', (e) => {
       const btn = e.target.closest('button');
@@ -1399,12 +1705,24 @@
       $('globeGuide').lastChild.textContent = ' 拖动旋转 · 双指缩放 · 点击光点收听';
     }
     wireEvents();
-    await store.init();
-    initGlobe();
+    // 跨机共享设置与目录加载互不依赖，并行进行；
+    // 遮罩只等数据（列表能立刻显示），不等地球的 WebGL 初始化软件渲染很慢，
+    // 让首屏内容尽早可见，地球随后在后台补上。
+    const stateReady = store.init().catch(() => {});
     await loadStations();
-    restoreLastStation();
+    startHealthWatcher();
     document.addEventListener('visibilitychange', () => { store.refresh(); });
-    setTimeout(() => $('boot').classList.add('is-done'), 260);
+    setTimeout(() => $('boot').classList.add('is-done'), 180);
+    // 收藏/上次收听依赖跨机状态，等它读回后再恢复
+    await stateReady;
+    restoreLastStation();
+    // 地球放到主线程空闲时构建，不阻塞首屏绘制与交互
+    const startGlobe = () => {
+      if (globeReady) return;
+      initGlobe();
+    };
+    if (window.requestIdleCallback) requestIdleCallback(startGlobe, { timeout: 800 });
+    else setTimeout(startGlobe, 60);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

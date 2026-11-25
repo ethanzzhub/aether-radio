@@ -33,12 +33,28 @@
             attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'
           }
         },
-        layers: [{ id: 'satellite', type: 'raster', source: 'satellite' }]
+        // 底图只压暗 raster 层，绿点图层不受影响
+        layers: [{
+          id: 'satellite',
+          type: 'raster',
+          source: 'satellite',
+          paint: {
+            // 保留影像本来色彩：之前压到 46% 亮度、去饱和 -62%，
+            // 整块地图像蒙了一层灰膜
+            'raster-brightness-max': 0.92,
+            'raster-saturation': 0.12,
+            'raster-contrast': 0.06,
+            'raster-hue-rotate': 0
+          }
+        }]
       },
       center: [12, 30],
       zoom: 1.6,
       attributionControl: false,
-      dragRotate: false
+      dragRotate: false,
+      // 关闭内置滚轮缩放：MapLibre 默认以光标为锚点，缩放时中心会朝光标漂移，
+      // 看起来像"只是缩小画面，画面却移动了"。改用下面以视图中心缩放的处理。
+      scrollZoom: false
     });
 
     let ready = false;
@@ -47,6 +63,20 @@
     const mapEl = map.getContainer();
     mapEl.classList.add('aether-satellite');
     mapEl.style.display = 'none';   // 默认隐藏，切到卫星模式才显示
+
+    // 以视图中心缩放：只改变 zoom，不动 center。速率对齐 MapLibre 内置手感
+    // （约 100px 一档），并按 deltaMode 归一化行/页滚动与像素滚动的差异。
+    mapEl.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      let d = e.deltaY;
+      if (e.deltaMode === 1) d *= 40;
+      else if (e.deltaMode === 2) d *= 800;
+      const z = map.getZoom() - d / 100;
+      map.easeTo({
+        zoom: Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), z)),
+        duration: 0
+      });
+    }, { passive: false });
 
     map.on('load', function () {
       ready = true;
@@ -99,6 +129,7 @@
     }, 500);
 
     let adding = false;
+    let curMarker = null;
     function addStationLayers() {
       if (adding || map.getSource('stations')) return;
       adding = true;
@@ -114,42 +145,41 @@
         paint: {
           'circle-radius': [
             'interpolate', ['linear'], ['get', 'votes'],
-            0, 2, 1000, 2.8, 10000, 3.8, 100000, 6
+            0, 0.8, 1000, 1, 10000, 1.4, 100000, 2.2
           ],
           'circle-color': [
             'match', ['get', 'src'],
-            'country', 'rgba(200,196,186,0.72)',
-            'admin1', 'rgba(226,190,128,0.85)',
-            'city', 'rgba(244,206,132,0.92)',
-            '#ffd98a'
+            'country', 'rgba(24, 232, 126, 0.95)',
+            'admin1', 'rgba(30, 240, 134, 0.97)',
+            'city', 'rgba(44, 246, 146, 0.98)',
+            '#18e87e'
           ],
-          'circle-stroke-width': 0.6,
-          'circle-stroke-color': 'rgba(60,40,12,0.35)',
-          'circle-opacity': 0.95
+          // 不描边，和 2D 视图保持一致
+          'circle-stroke-width': 0,
+          'circle-opacity': 0.98
         }
       });
-      // 当前播放台：外圈高亮
-      map.addSource('current', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: [] }
-      });
-      map.addLayer({
-        id: 'current-ring',
-        type: 'circle',
-        source: 'current',
-        paint: {
-          'circle-radius': 12,
-          'circle-color': 'rgba(0,0,0,0)',
-          'circle-stroke-width': 2.5,
-          'circle-stroke-color': '#ff7a45'
-        }
-      });
+      // 当前选中台的高亮改由 DOM 呼吸标记负责（见 refresh），
+      // 避免在 MapLibre 里做逐帧动画
 
-      map.on('click', 'stations-pts', function (e) {
-        const f = e.features && e.features[0];
-        if (!f) return;
-        const s = getStations().find(function (x) { return x.id === f.properties.id; });
-        if (s) onSelect(s);
+      // 点击拾取：以点击点为心取 12px 见方的 bbox 查询，再挑离光标最近的一个，
+      // 不必正好点在 1–2px 的点上
+      map.on('click', function (e) {
+        const box = [[e.point.x - 12, e.point.y - 12], [e.point.x + 12, e.point.y + 12]];
+        const feats = map.queryRenderedFeatures(box, { layers: ['stations-pts'] });
+        if (!feats.length) return;
+        let best = null;
+        let bestD = Infinity;
+        for (let i = 0; i < feats.length; i++) {
+          const p = map.project(feats[i].geometry.coordinates);
+          const dx = p.x - e.point.x;
+          const dy = p.y - e.point.y;
+          const d = dx * dx + dy * dy;
+          if (d < bestD) { bestD = d; best = feats[i]; }
+        }
+        if (!best) return;
+        const s = getStations().find(function (x) { return x.id === best.properties.id; });
+        if (s) setTimeout(function () { onSelect(s); }, 0);
       });
       map.on('mouseenter', 'stations-pts', function () { container.style.cursor = 'pointer'; });
       map.on('mouseleave', 'stations-pts', function () { container.style.cursor = ''; });
@@ -165,9 +195,20 @@
       }
       map.getSource('stations').setData({ type: 'FeatureCollection', features: features });
       const cur = getCurrent();
-      const curFeatures = cur && Number.isFinite(cur.lat) && Number.isFinite(cur.lng)
-        ? [toFeature(cur)] : [];
-      map.getSource('current').setData({ type: 'FeatureCollection', features: curFeatures });
+      if (cur && Number.isFinite(cur.lat) && Number.isFinite(cur.lng)) {
+        const pos = [cur.lng, cur.lat];
+        if (!curMarker) {
+          const el = document.createElement('div');
+          el.className = 'beacon';
+          el.innerHTML = '<i class="beacon-ping"></i><i class="beacon-ping"></i><i class="beacon-ping"></i><i class="beacon-core"></i>';
+          curMarker = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat(pos).addTo(map);
+        } else {
+          curMarker.setLngLat(pos);
+        }
+      } else if (curMarker) {
+        curMarker.remove();
+        curMarker = null;
+      }
     }
 
     function focus(s) {
